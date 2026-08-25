@@ -8,12 +8,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
+from PySide6.QtCore import QObject, QThread, Qt, Signal, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSettings
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QProgressBar, QTableView, QVBoxLayout, QWidget,
-    QHeaderView, QComboBox, QGroupBox, QGridLayout
+    QHeaderView, QComboBox, QGroupBox, QGridLayout, QDialog, QDialogButtonBox,
+    QFormLayout
 )
 
 from scanner import MediaScanner, MediaResult
@@ -124,9 +125,43 @@ class ScanWorker(QObject):
             self.finished.emit(cancelled)
 
 
+class FFprobeDialog(QDialog):
+    def __init__(self, current: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("FFprobe instellingen")
+        self.resize(650, 150)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.path_edit = QLineEdit(current)
+        self.path_edit.setPlaceholderText("Automatisch detecteren als dit leeg is")
+        browse = QPushButton("Bladeren…")
+        browse.clicked.connect(self.browse)
+        row = QHBoxLayout()
+        row.addWidget(self.path_edit, 1)
+        row.addWidget(browse)
+        form.addRow("FFprobe:", row)
+        layout.addLayout(form)
+        self.info = QLabel("Laat leeg om automatische detectie te gebruiken.")
+        self.info.setObjectName("status")
+        layout.addWidget(self.info)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Kies ffprobe", "", "FFprobe (ffprobe.exe ffprobe);;Alle bestanden (*)")
+        if path:
+            self.path_edit.setText(path)
+
+    def value(self) -> str:
+        return self.path_edit.text().strip()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("VideoAudioScanner", "VideoAudioScanner")
         self.setWindowTitle("VideoAudioScanner")
         self.resize(1450, 820)
         self.model = ResultsModel()
@@ -135,17 +170,17 @@ class MainWindow(QMainWindow):
         self.thread: Optional[QThread] = None
         self.worker: Optional[ScanWorker] = None
         self.scan_total = 0
-        self.scan_started = False
         self._build_ui()
         self._build_menu()
         self._apply_theme()
+        self._restore_state()
+        self.refresh_ffprobe_status()
 
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 16, 18, 18)
         layout.setSpacing(10)
-
         title = QLabel("VideoAudioScanner")
         title.setObjectName("title")
         subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe")
@@ -175,6 +210,19 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(self.cancel_button)
         source_layout.addWidget(self.export_button)
         layout.addWidget(source_box)
+
+        ff_box = QGroupBox("FFprobe")
+        ff_layout = QHBoxLayout(ff_box)
+        self.ffprobe_status = QLabel("Controleren…")
+        self.ffprobe_status.setObjectName("ffprobeStatus")
+        self.ffprobe_path = QLabel("")
+        self.ffprobe_path.setObjectName("status")
+        ff_layout.addWidget(self.ffprobe_status)
+        ff_layout.addWidget(self.ffprobe_path, 1)
+        ff_settings = QPushButton("Instellingen…")
+        ff_settings.clicked.connect(self.configure_ffprobe)
+        ff_layout.addWidget(ff_settings)
+        layout.addWidget(ff_box)
 
         stats = QGroupBox("Scanstatistieken")
         stats_layout = QGridLayout(stats)
@@ -223,11 +271,9 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(True)
         self.progress.setFormat("%v / %m")
         layout.addWidget(self.progress)
-
         self.status = QLabel("Klaar om te scannen.")
         self.status.setObjectName("status")
         layout.addWidget(self.status)
-
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
@@ -258,6 +304,10 @@ class MainWindow(QMainWindow):
         open_file = QAction("Geselecteerd bestand openen", self)
         open_file.triggered.connect(self.open_selected)
         menu.addAction(open_file)
+        menu.addSeparator()
+        ff = QAction("FFprobe instellingen", self)
+        ff.triggered.connect(self.configure_ffprobe)
+        menu.addAction(ff)
         menu.addSeparator()
         quit_action = QAction("Afsluiten", self)
         quit_action.triggered.connect(self.close)
@@ -290,7 +340,46 @@ class MainWindow(QMainWindow):
             QLabel#status { color: #aeb5c0; padding: 2px 4px; }
             QLabel#statCaption { color: #858c98; }
             QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; }
+            QLabel#ffprobeStatus { font-weight: 700; }
         """)
+
+    def _restore_state(self):
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        self.folder.setText(str(self.settings.value("folder", "")))
+
+    def _configured_ffprobe(self) -> str:
+        return str(self.settings.value("ffprobe", "")).strip()
+
+    def _make_scanner(self) -> MediaScanner:
+        scanner = MediaScanner()
+        configured = self._configured_ffprobe()
+        if configured and os.path.isfile(configured):
+            scanner.ffprobe = configured
+        return scanner
+
+    def refresh_ffprobe_status(self):
+        scanner = self._make_scanner()
+        if scanner.ffprobe:
+            self.ffprobe_status.setText("● FFprobe gevonden")
+            self.ffprobe_status.setStyleSheet("color: #65c47a; font-weight: 700;")
+            self.ffprobe_path.setText(scanner.ffprobe)
+        else:
+            self.ffprobe_status.setText("● FFprobe niet gevonden")
+            self.ffprobe_status.setStyleSheet("color: #e26d6d; font-weight: 700;")
+            self.ffprobe_path.setText("Installeer FFmpeg of kies handmatig een ffprobe executable.")
+
+    def configure_ffprobe(self):
+        dialog = FFprobeDialog(self._configured_ffprobe(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        value = dialog.value()
+        if value and not os.path.isfile(value):
+            QMessageBox.warning(self, "FFprobe", "Het gekozen bestand bestaat niet.")
+            return
+        self.settings.setValue("ffprobe", value)
+        self.refresh_ffprobe_status()
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Kies een map")
@@ -304,18 +393,40 @@ class MainWindow(QMainWindow):
             return
         if self.thread and self.thread.isRunning():
             return
+        scanner = self._make_scanner()
+        if not scanner.ffprobe:
+            answer = QMessageBox.warning(self, "FFprobe ontbreekt", "FFprobe is niet gevonden. Je kunt de scan toch starten, maar mediagegevens kunnen niet worden uitgelezen.\n\nWil je eerst FFprobe instellen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self.configure_ffprobe()
+                scanner = self._make_scanner()
+                if not scanner.ffprobe:
+                    return
         self.model.clear()
         self.progress.setValue(0)
         self.progress.setMaximum(0)
-        self.scan_total = 0
         self._update_stats()
         self.status.setText("Scan wordt voorbereid…")
         self.scan_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
-        self.scan_started = True
         self.thread = QThread(self)
         self.worker = ScanWorker(folder)
+        self.worker.scanner_override = scanner
+        original_run = self.worker.run
+        def run_with_scanner():
+            cancelled = False
+            try:
+                for index, item in enumerate(scanner.scan(folder), 1):
+                    if self.worker._cancel:
+                        cancelled = True
+                        break
+                    self.worker.result.emit(item)
+                    self.worker.progress.emit(index, scanner.last_total)
+            except Exception as exc:
+                self.worker.error.emit(str(exc))
+            finally:
+                self.worker.finished.emit(cancelled)
+        self.worker.run = run_with_scanner
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.result.connect(self.add_result)
@@ -338,16 +449,15 @@ class MainWindow(QMainWindow):
         self._update_stats()
 
     def update_progress(self, current: int, total: int):
-        self.scan_total = total
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(current)
-        self.status.setText(f"Scannen: {current}/{total} — {self.model.items[-1].name if self.model.items else ''}")
+        name = self.model.items[-1].name if self.model.items else ""
+        self.status.setText(f"Scannen: {current}/{total} — {name}")
 
     def scan_finished(self, cancelled: bool):
         self.scan_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.export_button.setEnabled(bool(self.model.items))
-        self.scan_started = False
         if cancelled:
             self.status.setText(f"Scan gestopt — {len(self.model.items)} bestanden verwerkt.")
         else:
@@ -369,15 +479,11 @@ class MainWindow(QMainWindow):
 
     def _update_stats(self):
         items = self.model.items
-        videos = sum(i.media_type == "Video" for i in items)
-        audio = sum(i.media_type == "Audio" for i in items)
-        errors = sum(i.status != "OK" for i in items)
-        total_size = sum(i.size_bytes for i in items)
         self.total_label.setText(str(len(items)))
-        self.video_label.setText(str(videos))
-        self.audio_label.setText(str(audio))
-        self.error_label.setText(str(errors))
-        self.size_label.setText(self._format_size(total_size))
+        self.video_label.setText(str(sum(i.media_type == "Video" for i in items)))
+        self.audio_label.setText(str(sum(i.media_type == "Audio" for i in items)))
+        self.error_label.setText(str(sum(i.status != "OK" for i in items)))
+        self.size_label.setText(self._format_size(sum(i.size_bytes for i in items)))
 
     @staticmethod
     def _format_size(value: int) -> str:
@@ -430,6 +536,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Exportfout", str(exc))
 
     def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("folder", self.folder.text())
         if self.worker and self.thread and self.thread.isRunning():
             self.worker.cancel()
             self.thread.quit()
