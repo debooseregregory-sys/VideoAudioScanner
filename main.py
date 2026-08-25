@@ -8,20 +8,47 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QSettings
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QObject,
+    QSettings,
+    QSortFilterProxyModel,
+    Qt,
+    QThread,
+    Signal,
+)
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPushButton, QProgressBar, QTableView, QVBoxLayout, QWidget,
-    QHeaderView, QComboBox, QGroupBox, QGridLayout, QDialog, QDialogButtonBox,
-    QFormLayout
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
-from scanner import MediaScanner, MediaResult
+from scanner import MediaResult, MediaScanner
 
 
 class ResultsModel(QAbstractTableModel):
-    HEADERS = ["Naam", "Type", "Duur", "Resolutie", "Video codec", "Audio codec", "Grootte", "Status"]
+    HEADERS = [
+        "Naam", "Type", "Duur", "Resolutie", "Video codec", "Audio codec",
+        "Bitrate", "Sample rate", "Kanalen", "FPS", "Container", "Grootte", "Status",
+    ]
 
     def __init__(self):
         super().__init__()
@@ -37,8 +64,11 @@ class ResultsModel(QAbstractTableModel):
         if not index.isValid() or not (0 <= index.row() < len(self.items)):
             return None
         item = self.items[index.row()]
-        values = [item.name, item.media_type, item.duration_text, item.resolution,
-                  item.video_codec, item.audio_codec, item.size_text, item.status]
+        values = [
+            item.name, item.media_type, item.duration_text, item.resolution,
+            item.video_codec, item.audio_codec, item.bitrate, item.sample_rate,
+            item.channels, item.fps, item.container, item.size_text, item.status,
+        ]
         if role == Qt.ItemDataRole.DisplayRole:
             return values[index.column()]
         if role == Qt.ItemDataRole.ToolTipRole and index.column() == 0:
@@ -61,6 +91,14 @@ class ResultsModel(QAbstractTableModel):
     def clear(self):
         self.beginResetModel()
         self.items.clear()
+        self.endResetModel()
+
+    def remove_paths(self, paths: set[str]):
+        if not paths:
+            return
+        kept = [item for item in self.items if item.path not in paths]
+        self.beginResetModel()
+        self.items = kept
         self.endResetModel()
 
 
@@ -88,8 +126,11 @@ class FilterProxy(QSortFilterProxyModel):
         if self.status_filter == "OK" and item.status != "OK":
             return False
         if self.text_filter:
-            haystack = " ".join([item.name, item.path, item.media_type, item.resolution,
-                                  item.video_codec, item.audio_codec, item.status]).casefold()
+            haystack = " ".join([
+                item.name, item.path, item.media_type, item.resolution,
+                item.video_codec, item.audio_codec, item.bitrate,
+                item.sample_rate, item.channels, item.fps, item.container, item.status,
+            ]).casefold()
             if self.text_filter not in haystack:
                 return False
         return True
@@ -101,9 +142,10 @@ class ScanWorker(QObject):
     finished = Signal(bool)
     error = Signal(str)
 
-    def __init__(self, folder: str):
+    def __init__(self, folder: str, ffprobe: str | None = None):
         super().__init__()
         self.folder = folder
+        self.ffprobe = ffprobe
         self._cancel = False
 
     def cancel(self):
@@ -112,7 +154,7 @@ class ScanWorker(QObject):
     def run(self):
         cancelled = False
         try:
-            scanner = MediaScanner()
+            scanner = MediaScanner(self.ffprobe)
             for index, item in enumerate(scanner.scan(self.folder), 1):
                 if self._cancel:
                     cancelled = True
@@ -144,13 +186,17 @@ class FFprobeDialog(QDialog):
         self.info = QLabel("Laat leeg om automatische detectie te gebruiken.")
         self.info.setObjectName("status")
         layout.addWidget(self.info)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Kies ffprobe", "", "FFprobe (ffprobe.exe ffprobe);;Alle bestanden (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Kies ffprobe", "", "FFprobe (ffprobe.exe ffprobe);;Alle bestanden (*)"
+        )
         if path:
             self.path_edit.setText(path)
 
@@ -158,29 +204,90 @@ class FFprobeDialog(QDialog):
         return self.path_edit.text().strip()
 
 
+def move_to_recycle_bin(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Move files to the Windows Recycle Bin without permanently deleting them."""
+    if not paths:
+        return [], []
+    if os.name != "nt":
+        raise RuntimeError("Windows Prullenbak is alleen beschikbaar op Windows.")
+
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.UINT),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    FO_DELETE = 0x0003
+    FOF_SILENT = 0x0004
+    FOF_NOCONFIRMATION = 0x0010
+    FOF_ALLOWUNDO = 0x0040
+    FOF_NOERRORUI = 0x0400
+
+    existing: list[str] = []
+    failed: list[str] = []
+    for path in paths:
+        try:
+            if Path(path).is_file():
+                existing.append(path)
+        except OSError:
+            failed.append(path)
+
+    if not existing:
+        return [], failed
+
+    # SHFileOperation expects a double-NUL-terminated list of paths.
+    source = "".join(path + "\0" for path in existing) + "\0"
+    operation = SHFILEOPSTRUCTW(
+        None,
+        FO_DELETE,
+        source,
+        None,
+        FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI,
+        False,
+        None,
+        None,
+    )
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0 or operation.fAnyOperationsAborted:
+        failed.extend(existing)
+        return [], failed
+
+    return existing, failed
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings("VideoAudioScanner", "VideoAudioScanner")
         self.setWindowTitle("VideoAudioScanner")
-        self.resize(1450, 820)
+        self.resize(1550, 850)
         self.model = ResultsModel()
         self.proxy = FilterProxy()
         self.proxy.setSourceModel(self.model)
         self.thread: Optional[QThread] = None
         self.worker: Optional[ScanWorker] = None
-        self.scan_total = 0
         self._build_ui()
         self._build_menu()
         self._apply_theme()
         self._restore_state()
         self.refresh_ffprobe_status()
+        self._update_action_state()
 
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 16, 18, 18)
         layout.setSpacing(10)
+
         title = QLabel("VideoAudioScanner")
         title.setObjectName("title")
         subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe")
@@ -232,9 +339,11 @@ class MainWindow(QMainWindow):
         self.error_label = self._stat_label("0")
         self.size_label = self._stat_label("0 B")
         for col, (caption, widget) in enumerate([
-            ("Totaal", self.total_label), ("Video", self.video_label),
-            ("Audio", self.audio_label), ("Fouten", self.error_label),
-            ("Totale grootte", self.size_label)
+            ("Totaal", self.total_label),
+            ("Video", self.video_label),
+            ("Audio", self.audio_label),
+            ("Fouten", self.error_label),
+            ("Totale grootte", self.size_label),
         ]):
             box = QWidget()
             box_layout = QVBoxLayout(box)
@@ -259,12 +368,19 @@ class MainWindow(QMainWindow):
         self.status_filter.currentTextChanged.connect(self.apply_filters)
         clear = QPushButton("Filters wissen")
         clear.clicked.connect(self.clear_filters)
+        self.select_all_button = QPushButton("Alles selecteren")
+        self.select_all_button.clicked.connect(self.select_all_visible)
+        self.delete_button = QPushButton("🗑  Naar Prullenbak")
+        self.delete_button.setObjectName("danger")
+        self.delete_button.clicked.connect(self.delete_selected)
         filter_layout.addWidget(self.search, 1)
         filter_layout.addWidget(QLabel("Type:"))
         filter_layout.addWidget(self.type_filter)
         filter_layout.addWidget(QLabel("Status:"))
         filter_layout.addWidget(self.status_filter)
         filter_layout.addWidget(clear)
+        filter_layout.addWidget(self.select_all_button)
+        filter_layout.addWidget(self.delete_button)
         layout.addWidget(filter_box)
 
         self.progress = QProgressBar()
@@ -274,18 +390,21 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Klaar om te scannen.")
         self.status.setObjectName("status")
         layout.addWidget(self.status)
+
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.doubleClicked.connect(self.open_selected)
+        self.table.selectionModel().selectionChanged.connect(self._update_action_state)
         header = self.table.horizontalHeader()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for col, width in enumerate([330, 80, 95, 120, 120, 120, 110, 250]):
+        widths = [300, 75, 85, 115, 105, 105, 95, 105, 80, 80, 115, 105, 250]
+        for col, width in enumerate(widths):
             self.table.setColumnWidth(col, width)
         layout.addWidget(self.table, 1)
         self.setCentralWidget(root)
@@ -301,9 +420,13 @@ class MainWindow(QMainWindow):
         export = QAction("CSV exporteren", self)
         export.triggered.connect(self.export_csv)
         menu.addAction(export)
-        open_file = QAction("Geselecteerd bestand openen", self)
+        open_file = QAction("Geselecteerde bestanden openen", self)
         open_file.triggered.connect(self.open_selected)
         menu.addAction(open_file)
+        menu.addSeparator()
+        self.delete_action = QAction("Geselecteerde bestanden naar Prullenbak", self)
+        self.delete_action.triggered.connect(self.delete_selected)
+        menu.addAction(self.delete_action)
         menu.addSeparator()
         ff = QAction("FFprobe instellingen", self)
         ff.triggered.connect(self.configure_ffprobe)
@@ -330,6 +453,8 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: #353b45; }
             QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; }
             QPushButton#primary:hover { background: #3b70b6; }
+            QPushButton#danger { background: #632d35; border-color: #82404a; font-weight: 600; }
+            QPushButton#danger:hover { background: #7a3540; }
             QPushButton:disabled { color: #666c75; background: #202329; }
             QProgressBar { background: #1e2127; border: 1px solid #353a43; border-radius: 5px; height: 18px; text-align: center; }
             QProgressBar::chunk { background: #477dcc; border-radius: 4px; }
@@ -353,11 +478,8 @@ class MainWindow(QMainWindow):
         return str(self.settings.value("ffprobe", "")).strip()
 
     def _make_scanner(self) -> MediaScanner:
-        scanner = MediaScanner()
         configured = self._configured_ffprobe()
-        if configured and os.path.isfile(configured):
-            scanner.ffprobe = configured
-        return scanner
+        return MediaScanner(configured or None)
 
     def refresh_ffprobe_status(self):
         scanner = self._make_scanner()
@@ -382,108 +504,206 @@ class MainWindow(QMainWindow):
         self.refresh_ffprobe_status()
 
     def choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Kies een map")
+        folder = QFileDialog.getExistingDirectory(self, "Kies scanmap", self.folder.text().strip() or os.getcwd())
         if folder:
             self.folder.setText(folder)
+            self.settings.setValue("folder", folder)
 
     def start_scan(self):
-        folder = self.folder.text().strip()
-        if not folder or not os.path.isdir(folder):
-            QMessageBox.warning(self, "Map ontbreekt", "Kies eerst een geldige map.")
-            return
         if self.thread and self.thread.isRunning():
             return
-        scanner = self._make_scanner()
-        if not scanner.ffprobe:
-            answer = QMessageBox.warning(self, "FFprobe ontbreekt", "FFprobe is niet gevonden. Je kunt de scan toch starten, maar mediagegevens kunnen niet worden uitgelezen.\n\nWil je eerst FFprobe instellen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if answer == QMessageBox.StandardButton.Yes:
-                self.configure_ffprobe()
-                scanner = self._make_scanner()
-                if not scanner.ffprobe:
-                    return
+        folder = self.folder.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "Scan", "Kies eerst een geldige map.")
+            return
+
         self.model.clear()
+        self._update_stats()
         self.progress.setValue(0)
         self.progress.setMaximum(0)
-        self._update_stats()
-        self.status.setText("Scan wordt voorbereid…")
+        self.status.setText("Scan wordt gestart…")
         self.scan_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
+        self.settings.setValue("folder", folder)
+
         self.thread = QThread(self)
-        self.worker = ScanWorker(folder)
-        self.worker.scanner_override = scanner
-        original_run = self.worker.run
-        def run_with_scanner():
-            cancelled = False
-            try:
-                for index, item in enumerate(scanner.scan(folder), 1):
-                    if self.worker._cancel:
-                        cancelled = True
-                        break
-                    self.worker.result.emit(item)
-                    self.worker.progress.emit(index, scanner.last_total)
-            except Exception as exc:
-                self.worker.error.emit(str(exc))
-            finally:
-                self.worker.finished.emit(cancelled)
-        self.worker.run = run_with_scanner
+        self.worker = ScanWorker(folder, self._configured_ffprobe() or None)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
-        self.worker.result.connect(self.add_result)
-        self.worker.progress.connect(self.update_progress)
-        self.worker.error.connect(self.show_scan_error)
-        self.worker.finished.connect(self.scan_finished)
+        self.worker.result.connect(self._add_result)
+        self.worker.progress.connect(self._scan_progress)
+        self.worker.error.connect(self._scan_error)
+        self.worker.finished.connect(self._scan_finished)
         self.worker.finished.connect(self.thread.quit)
-        self.thread.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self._thread_finished)
         self.thread.start()
 
     def cancel_scan(self):
         if self.worker:
             self.worker.cancel()
+            self.status.setText("Scan wordt gestopt…")
             self.cancel_button.setEnabled(False)
-            self.status.setText("Stoppen na het huidige bestand…")
 
-    def add_result(self, item: MediaResult):
+    def _add_result(self, item: MediaResult):
         self.model.add(item)
         self._update_stats()
+        self.export_button.setEnabled(True)
 
-    def update_progress(self, current: int, total: int):
-        self.progress.setMaximum(max(total, 1))
+    def _scan_progress(self, current: int, total: int):
+        self.progress.setMaximum(total)
         self.progress.setValue(current)
-        name = self.model.items[-1].name if self.model.items else ""
-        self.status.setText(f"Scannen: {current}/{total} — {name}")
+        self.status.setText(f"Scannen… {current} / {total}: {self.model.items[-1].name if self.model.items else ''}")
 
-    def scan_finished(self, cancelled: bool):
-        self.scan_button.setEnabled(True)
+    def _scan_error(self, message: str):
+        self.status.setText(f"Fout: {message}")
+        QMessageBox.critical(self, "Scanfout", message)
+
+    def _scan_finished(self, cancelled: bool):
+        self.progress.setMaximum(max(1, self.progress.maximum()))
         self.cancel_button.setEnabled(False)
-        self.export_button.setEnabled(bool(self.model.items))
         if cancelled:
-            self.status.setText(f"Scan gestopt — {len(self.model.items)} bestanden verwerkt.")
+            self.status.setText(f"Scan gestopt. {len(self.model.items)} resultaten behouden.")
         else:
-            self.status.setText(f"Klaar — {len(self.model.items)} bestanden verwerkt.")
+            self.progress.setValue(self.progress.maximum())
+            self.status.setText(f"Scan klaar. {len(self.model.items)} resultaten gevonden.")
+        self.export_button.setEnabled(bool(self.model.items))
+        self._update_stats()
+
+    def _thread_finished(self):
+        if self.worker:
+            self.worker.deleteLater()
+        if self.thread:
+            self.thread.deleteLater()
         self.worker = None
         self.thread = None
-
-    def show_scan_error(self, text: str):
-        QMessageBox.critical(self, "Scanfout", text)
+        self.scan_button.setEnabled(True)
 
     def apply_filters(self):
         self.proxy.set_filters(self.search.text(), self.type_filter.currentText(), self.status_filter.currentText())
-        self.status.setText(f"{self.proxy.rowCount()} van {len(self.model.items)} resultaten zichtbaar.")
+        self._update_action_state()
 
     def clear_filters(self):
         self.search.clear()
         self.type_filter.setCurrentIndex(0)
         self.status_filter.setCurrentIndex(0)
 
+    def select_all_visible(self):
+        self.table.selectAll()
+        self._update_action_state()
+
+    def _selected_items(self) -> list[MediaResult]:
+        selection = self.table.selectionModel().selectedRows()
+        items: list[MediaResult] = []
+        seen: set[str] = set()
+        for proxy_index in selection:
+            source_index = self.proxy.mapToSource(proxy_index)
+            if source_index.isValid():
+                item = self.model.items[source_index.row()]
+                if item.path not in seen:
+                    seen.add(item.path)
+                    items.append(item)
+        return items
+
+    def _update_action_state(self, *args):
+        has_selection = bool(self._selected_items())
+        self.delete_button.setEnabled(has_selection and not (self.thread and self.thread.isRunning()))
+        if hasattr(self, "delete_action"):
+            self.delete_action.setEnabled(has_selection and not (self.thread and self.thread.isRunning()))
+
+    def delete_selected(self):
+        items = self._selected_items()
+        if not items:
+            return
+        if self.thread and self.thread.isRunning():
+            QMessageBox.information(self, "Prullenbak", "Wacht tot de scan klaar is voordat je bestanden verwijdert.")
+            return
+
+        paths = [item.path for item in items]
+        preview = "\n".join(f"• {item.name}" for item in items[:12])
+        if len(items) > 12:
+            preview += f"\n• … en nog {len(items) - 12} bestand(en)"
+        answer = QMessageBox.question(
+            self,
+            "Naar Prullenbak",
+            f"Wil je {len(items)} geselecteerd(e) bestand(en) naar de Windows Prullenbak verplaatsen?\n\n{preview}\n\nDe bestanden worden niet definitief verwijderd.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            moved, failed = move_to_recycle_bin(paths)
+        except Exception as exc:
+            QMessageBox.critical(self, "Prullenbak", f"Verplaatsen naar de Prullenbak is mislukt:\n{exc}")
+            return
+
+        moved_paths = {os.path.normcase(path) for path in moved}
+        actual_removed = {item.path for item in items if os.path.normcase(item.path) in moved_paths}
+        self.model.remove_paths(actual_removed)
+        self._update_stats()
+        self._update_action_state()
+
+        if failed:
+            names = "\n".join(Path(path).name for path in failed[:10])
+            if len(failed) > 10:
+                names += f"\n… en nog {len(failed) - 10}"
+            QMessageBox.warning(
+                self,
+                "Prullenbak",
+                f"{len(moved)} bestand(en) naar de Prullenbak verplaatst.\n\nNiet gelukt: {len(failed)}\n{names}",
+            )
+        else:
+            self.status.setText(f"{len(moved)} bestand(en) naar de Windows Prullenbak verplaatst.")
+
+    def open_selected(self, index=None):
+        items = self._selected_items()
+        if not items and index is not None and index.isValid():
+            source_index = self.proxy.mapToSource(index)
+            if source_index.isValid():
+                items = [self.model.items[source_index.row()]]
+        if not items:
+            return
+        path = items[0].path
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            QMessageBox.warning(self, "Bestand openen", f"Kan het bestand niet openen:\n{exc}")
+
+    def export_csv(self):
+        if not self.model.items:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "CSV exporteren", "VideoAudioScanner.csv", "CSV-bestanden (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(asdict(self.model.items[0]).keys()), delimiter=";")
+                writer.writeheader()
+                for item in self.model.items:
+                    writer.writerow(asdict(item))
+        except OSError as exc:
+            QMessageBox.critical(self, "CSV export", f"Exporteren is mislukt:\n{exc}")
+            return
+        self.status.setText(f"CSV geëxporteerd: {path}")
+
     def _update_stats(self):
         items = self.model.items
+        videos = sum(item.media_type == "Video" for item in items)
+        audios = sum(item.media_type == "Audio" for item in items)
+        errors = sum(item.status != "OK" for item in items)
+        total_size = sum(item.size_bytes for item in items)
         self.total_label.setText(str(len(items)))
-        self.video_label.setText(str(sum(i.media_type == "Video" for i in items)))
-        self.audio_label.setText(str(sum(i.media_type == "Audio" for i in items)))
-        self.error_label.setText(str(sum(i.status != "OK" for i in items)))
-        self.size_label.setText(self._format_size(sum(i.size_bytes for i in items)))
+        self.video_label.setText(str(videos))
+        self.audio_label.setText(str(audios))
+        self.error_label.setText(str(errors))
+        self.size_label.setText(self._format_size(total_size))
 
     @staticmethod
     def _format_size(value: int) -> str:
@@ -494,61 +714,20 @@ class MainWindow(QMainWindow):
             size /= 1024
         return f"{value} B"
 
-    def _selected_item(self) -> Optional[MediaResult]:
-        index = self.table.currentIndex()
-        if not index.isValid():
-            return None
-        source = self.proxy.mapToSource(index)
-        return self.model.items[source.row()] if source.isValid() else None
-
-    def open_selected(self, *_):
-        item = self._selected_item()
-        if not item:
-            return
-        if not os.path.exists(item.path):
-            QMessageBox.warning(self, "Bestand ontbreekt", f"Het bestand bestaat niet meer:\n{item.path}")
-            return
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(item.path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", item.path])
-            else:
-                subprocess.Popen(["xdg-open", item.path])
-        except OSError as exc:
-            QMessageBox.critical(self, "Openen mislukt", str(exc))
-
-    def export_csv(self):
-        if not self.model.items:
-            QMessageBox.information(self, "Geen resultaten", "Voer eerst een scan uit.")
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "CSV opslaan", "video_audio_scan.csv", "CSV-bestanden (*.csv)")
-        if not path:
-            return
-        fields = list(asdict(self.model.items[0]).keys())
-        try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
-                writer = csv.DictWriter(handle, fieldnames=fields)
-                writer.writeheader()
-                writer.writerows(asdict(item) for item in self.model.items)
-            self.status.setText(f"CSV opgeslagen: {Path(path).name}")
-        except OSError as exc:
-            QMessageBox.critical(self, "Exportfout", str(exc))
-
     def closeEvent(self, event):
-        self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("folder", self.folder.text())
-        if self.worker and self.thread and self.thread.isRunning():
+        if self.thread and self.thread.isRunning():
             self.worker.cancel()
             self.thread.quit()
             self.thread.wait(3000)
-        event.accept()
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("folder", self.folder.text().strip())
+        super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("VideoAudioScanner")
-    app.setStyle("Fusion")
+    app.setOrganizationName("VideoAudioScanner")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
