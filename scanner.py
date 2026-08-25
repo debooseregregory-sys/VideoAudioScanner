@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -28,31 +30,68 @@ class MediaResult:
 
 
 class MediaScanner:
-    def __init__(self):
-        self.ffprobe = self._find_ffprobe()
+    """Recursively scan media files and read metadata with FFprobe."""
+
+    def __init__(self, ffprobe_path: str | None = None):
+        self.ffprobe = self._find_ffprobe(ffprobe_path)
         self.last_total = 0
 
     @staticmethod
-    def _find_ffprobe() -> str | None:
-        names = ["ffprobe.exe", "ffprobe"] if os.name == "nt" else ["ffprobe"]
-        for name in names:
-            found = shutil.which(name)
-            if found:
-                return found
-        candidates = []
+    def _find_ffprobe(explicit: str | None = None) -> str | None:
+        candidates: list[Path] = []
+        if explicit:
+            candidates.append(Path(explicit).expanduser())
+
+        env_path = os.environ.get("VIDEOAUDIOSCANNER_FFPROBE", "").strip()
+        if env_path:
+            candidates.append(Path(env_path).expanduser())
+
+        found = shutil.which("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if found:
+            candidates.append(Path(found))
+
+        app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+        candidates.extend([
+            app_dir / "ffprobe.exe",
+            app_dir / "ffmpeg" / "bin" / "ffprobe.exe",
+            app_dir / "tools" / "ffprobe.exe",
+            Path.cwd() / "tools" / "ffprobe.exe",
+        ])
+
         if os.name == "nt":
-            candidates += [
-                Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "ffmpeg" / "bin" / "ffprobe.exe",
-                Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "FFmpeg" / "bin" / "ffprobe.exe",
-            ]
+            program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+            local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
+            candidates.extend([
+                program_files / "ffmpeg" / "bin" / "ffprobe.exe",
+                program_files / "FFmpeg" / "bin" / "ffprobe.exe",
+                program_files_x86 / "ffmpeg" / "bin" / "ffprobe.exe",
+                local_app_data / "ffmpeg" / "bin" / "ffprobe.exe",
+            ])
+
+        seen: set[str] = set()
         for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
+            try:
+                key = str(candidate.resolve()).casefold()
+            except OSError:
+                key = str(candidate).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if candidate.is_file():
+                    return str(candidate)
+            except OSError:
+                continue
         return None
 
     def scan(self, folder: str) -> Iterator[MediaResult]:
         root = Path(folder)
-        files = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXTENSIONS]
+        try:
+            files = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXTENSIONS]
+        except (OSError, PermissionError) as exc:
+            raise RuntimeError(f"Kan de map niet lezen: {exc}") from exc
+        files.sort(key=lambda p: str(p).casefold())
         self.last_total = len(files)
         for path in files:
             yield self._inspect(path)
@@ -87,6 +126,17 @@ class MediaScanner:
                 base["video_codec"] = video.get("codec_name") or "—"
             if audio:
                 base["audio_codec"] = audio.get("codec_name") or "—"
+            if not video and not audio:
+                base["status"] = "Geen media-stream gevonden"
+        except subprocess.TimeoutExpired:
+            base["status"] = "Fout: FFprobe timeout (>60 s)"
+        except FileNotFoundError:
+            base["status"] = "Fout: FFprobe kon niet worden gestart"
+        except PermissionError:
+            base["status"] = "Fout: geen toegang"
+        except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+            message = str(exc).strip() or "FFprobe kon het bestand niet lezen."
+            base["status"] = f"Fout: {message[:120]}"
         except Exception as exc:
             base["status"] = f"Fout: {str(exc)[:120]}"
         return MediaResult(**base)
@@ -95,11 +145,11 @@ class MediaScanner:
         completed = subprocess.run(
             [self.ffprobe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         if completed.returncode != 0:
             message = completed.stderr.strip() or "FFprobe kon het bestand niet lezen."
             raise RuntimeError(message)
-        import json
         return json.loads(completed.stdout)
 
 
