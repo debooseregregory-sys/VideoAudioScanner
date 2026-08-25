@@ -7,22 +7,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtWidgets import QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QDialog
 
 from scanner import VIDEO_EXTENSIONS, MediaScanner
 
@@ -62,12 +50,7 @@ def find_ffmpeg() -> str | None:
         if found:
             return found
     here = Path(__file__).resolve().parent
-    candidates = [
-        here / "ffmpeg.exe",
-        here / "ffmpeg" / "bin" / "ffmpeg.exe",
-        here / "tools" / "ffmpeg.exe",
-    ]
-    for candidate in candidates:
+    for candidate in (here / "ffmpeg.exe", here / "ffmpeg" / "bin" / "ffmpeg.exe", here / "tools" / "ffmpeg.exe"):
         if candidate.is_file():
             return str(candidate)
     return None
@@ -99,31 +82,17 @@ def parse_bitrate(value: str) -> int:
 def exact_hash(path: str, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(chunk_size)
-            if not chunk:
-                break
+        while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
 
 
 def visual_fingerprint(ffmpeg: str, path: str, duration: float) -> bytes:
-    """Extract four small grayscale frames used for visual similarity scoring."""
     points = [0.0] if duration <= 0 else [duration * fraction for fraction in (0.10, 0.35, 0.60, 0.85)]
     result = bytearray()
     for point in points:
-        command = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-ss", f"{point:.3f}", "-i", path,
-            "-frames:v", "1", "-vf", "scale=32:18,format=gray",
-            "-f", "rawvideo", "pipe:1",
-        ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=45,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{point:.3f}", "-i", path, "-frames:v", "1", "-vf", "scale=32:18,format=gray", "-f", "rawvideo", "pipe:1"]
+        completed = subprocess.run(command, capture_output=True, timeout=45, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         if completed.returncode == 0 and completed.stdout:
             result.extend(completed.stdout)
     return bytes(result)
@@ -136,15 +105,13 @@ def visual_similarity(first: bytes, second: bytes) -> int:
     if not length:
         return 0
     difference = sum(abs(first[index] - second[index]) for index in range(length)) / length
-    return max(0, min(100, int(round(100 - (difference / 255 * 100)))))
+    return max(0, min(100, int(round(100 - difference / 255 * 100))))
 
 
 def quality_score(info: VideoInfo) -> float:
     pixels = info.width * info.height
     bitrate = info.bitrate or 0
     duration = max(info.duration, 1.0)
-    # Resolution is strongest, bitrate is second, and the encoded data rate per second
-    # helps distinguish otherwise equal resolutions without blindly preferring huge files.
     return pixels * 1000 + bitrate + info.size / duration
 
 
@@ -153,40 +120,17 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         raise RuntimeError("FFprobe is niet gevonden.")
     if not ffmpeg:
         raise RuntimeError("FFmpeg is niet gevonden. FFmpeg is nodig om de videobeelden te vergelijken.")
-
     scanner = MediaScanner(ffprobe)
     root = Path(folder)
-    paths = sorted(
-        (path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS),
-        key=lambda p: str(p).casefold(),
-    )
-
+    paths = sorted((p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS), key=lambda p: str(p).casefold())
     infos: list[VideoInfo] = []
-    total = len(paths)
     for index, path in enumerate(paths, 1):
         result = scanner._inspect(path)
         width, height = parse_resolution(result.resolution)
-        infos.append(VideoInfo(
-            path=result.path,
-            name=result.name,
-            size=result.size_bytes,
-            duration=result.duration_seconds,
-            duration_text=result.duration_text,
-            resolution=result.resolution,
-            width=width,
-            height=height,
-            bitrate=parse_bitrate(result.bitrate),
-            bitrate_text=result.bitrate,
-            video_codec=result.video_codec,
-            audio_codec=result.audio_codec,
-            fps=result.fps,
-            container=result.container,
-        ))
+        infos.append(VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container))
         if progress:
-            progress(index, total)
+            progress(index, len(paths))
 
-    # Exact duplicates are detected with SHA-256, but only files with equal byte size
-    # are hashed so a large collection does not require hashing every video twice.
     by_size: dict[int, list[VideoInfo]] = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
@@ -199,17 +143,14 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
     for info in infos:
         if info.video_hash:
             exact_groups.setdefault(info.video_hash, []).append(info)
-
     groups: list[list[VideoInfo]] = []
     used: set[str] = set()
     for candidates in exact_groups.values():
         if len(candidates) > 1:
             groups.append(candidates)
-            used.update(info.path for info in candidates)
+            used.update(i.path for i in candidates)
 
-    # Visual pass for files that are not byte-for-byte identical. Duration/name are
-    # used as inexpensive gates before FFmpeg frame comparison.
-    remaining = [info for info in infos if info.path not in used]
+    remaining = [i for i in infos if i.path not in used]
     fingerprints: dict[str, bytes] = {}
     for index, info in enumerate(remaining, 1):
         try:
@@ -219,7 +160,7 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         if progress:
             progress(index, len(remaining))
 
-    candidate_pairs: list[tuple[VideoInfo, VideoInfo, int]] = []
+    pairs: list[tuple[VideoInfo, VideoInfo, int]] = []
     for index, first in enumerate(remaining):
         for second in remaining[index + 1:]:
             if first.duration <= 0 or second.duration <= 0:
@@ -230,9 +171,9 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
                 continue
             similarity = visual_similarity(fingerprints.get(first.path, b""), fingerprints.get(second.path, b""))
             if similarity >= 90 or (same_name and similarity >= 82):
-                candidate_pairs.append((first, second, similarity))
+                pairs.append((first, second, similarity))
 
-    for first, second, _similarity in candidate_pairs:
+    for first, second, _ in pairs:
         target = next((group for group in groups if first in group or second in group), None)
         if target is None:
             groups.append([first, second])
@@ -246,24 +187,13 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
     for group_number, group in enumerate(groups, 1):
         best = max(group, key=quality_score)
         for info in group:
-            similarity = 100 if info.video_hash else 95
-            if info is not best:
-                scores = []
-                for other in group:
-                    if other is info:
-                        continue
-                    if info.video_hash and info.video_hash == other.video_hash:
-                        scores.append(100)
-                    else:
-                        scores.append(visual_similarity(fingerprints.get(info.path, b""), fingerprints.get(other.path, b"")))
-                if scores:
-                    similarity = max(scores)
+            scores = [100 if info.video_hash and info.video_hash == other.video_hash else visual_similarity(fingerprints.get(info.path, b""), fingerprints.get(other.path, b"")) for other in group if other is not info]
+            similarity = max(scores) if scores else 100
             delete = info is not best and quality_score(info) < quality_score(best)
             reason = "Beste kwaliteit behouden" if not delete else "Lagere kwaliteit dan beste versie"
-            if info.video_hash and group[0].video_hash == info.video_hash:
+            if info.video_hash:
                 reason = "Exact identiek" if delete else "Exacte originele versie"
             results.append(DuplicateCandidate(group_number, similarity, info, delete, reason))
-
     return results
 
 
@@ -274,15 +204,71 @@ class FinderWorker(QThread):
 
     def __init__(self, folder: str, ffprobe: str | None, ffmpeg: str | None):
         super().__init__()
-        self.folder = folder
-        self.ffprobe = ffprobe
-        self.ffmpeg = ffmpeg
+        self.folder, self.ffprobe, self.ffmpeg = folder, ffprobe, ffmpeg
 
     def run(self):
         try:
             self.result.emit(analyse_videos(self.folder, self.ffprobe, self.ffmpeg, self.progress.emit))
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class VideoPreviewDialog(QDialog):
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Video bekijken — {Path(path).name}")
+        self.resize(1100, 700)
+        self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.video = QVideoWidget(self)
+        self.player.setAudioOutput(self.audio)
+        self.player.setVideoOutput(self.video)
+        self.audio.setVolume(1.0)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.video, 1)
+        controls = QHBoxLayout()
+        self.play_button = QPushButton("Pauze")
+        self.play_button.clicked.connect(self.toggle_play)
+        stop = QPushButton("Stop")
+        stop.clicked.connect(self.player.stop)
+        external = QPushButton("Openen in Windows")
+        external.clicked.connect(lambda: open_video(path))
+        controls.addWidget(self.play_button)
+        controls.addWidget(stop)
+        controls.addStretch(1)
+        controls.addWidget(external)
+        layout.addLayout(controls)
+        self.player.mediaStatusChanged.connect(self.media_status)
+        self.player.errorOccurred.connect(self.media_error)
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.play()
+
+    def toggle_play(self):
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+            self.play_button.setText("Afspelen")
+        else:
+            self.player.play()
+            self.play_button.setText("Pauze")
+
+    def media_status(self, status):
+        if status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self.play_button.setText("Niet afspeelbaar")
+
+    def media_error(self, _error, error_string):
+        if error_string:
+            self.play_button.setText("Niet afspeelbaar")
+
+    def closeEvent(self, event):
+        self.player.stop()
+        super().closeEvent(event)
+
+
+def open_video(path: str):
+    try:
+        os.startfile(path)
+    except OSError as exc:
+        QMessageBox.warning(None, "Video openen", f"Kan de video niet openen:\n\n{path}\n\n{exc}")
 
 
 class DuplicateFinderWindow(QMainWindow):
@@ -292,6 +278,7 @@ class DuplicateFinderWindow(QMainWindow):
         self.resize(1600, 860)
         self.worker: FinderWorker | None = None
         self.rows: list[DuplicateCandidate] = []
+        self.preview_windows: list[VideoPreviewDialog] = []
         self._build_ui()
         self._apply_theme()
 
@@ -300,21 +287,16 @@ class DuplicateFinderWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 16, 18, 18)
         layout.setSpacing(10)
-
         header = QHBoxLayout()
         title = QLabel("Dubbele video's")
         title.setObjectName("title")
-        header.addWidget(title)
-        header.addStretch(1)
         credit = QLabel("Made by Kid Acid")
         credit.setObjectName("credit")
+        header.addWidget(title)
+        header.addStretch(1)
         header.addWidget(credit)
         layout.addLayout(header)
-
-        info = QLabel(
-            "Exacte duplicaten worden met SHA-256 herkend. Andere kandidaten worden visueel vergeleken met FFmpeg. "
-            "Resolutie, bitrate, duur, codecs, FPS en container bepalen welke versie vermoedelijk het beste is."
-        )
+        info = QLabel("Exacte duplicaten worden met SHA-256 herkend. Andere kandidaten worden visueel vergeleken met FFmpeg. Resolutie, bitrate, duur, codecs, FPS en container bepalen welke versie vermoedelijk het beste is. Dubbelklik op een video om hem te bekijken.")
         info.setWordWrap(True)
         info.setObjectName("subtitle")
         layout.addWidget(info)
@@ -332,46 +314,44 @@ class DuplicateFinderWindow(QMainWindow):
         source_layout.addWidget(choose)
         source_layout.addWidget(self.scan_button)
         layout.addWidget(source)
-
         self.progress = QProgressBar()
         self.progress.setFormat("%v / %m")
         layout.addWidget(self.progress)
         self.status = QLabel("Klaar om te zoeken.")
         layout.addWidget(self.status)
 
-        self.table = QTableWidget(0, 11)
-        self.table.setHorizontalHeaderLabels([
-            "Verwijderen", "Groep", "Bestand", "Resolutie", "Bitrate", "Duur",
-            "Video codec", "Audio codec", "FPS", "Container", "Overeenkomst / beoordeling",
-        ])
+        self.table = QTableWidget(0, 12)
+        self.table.setHorizontalHeaderLabels(["Verwijderen", "Voorbeeld", "Groep", "Bestand", "Resolutie", "Bitrate", "Duur", "Video codec", "Audio codec", "FPS", "Container", "Overeenkomst / beoordeling"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        widths = [95, 60, 350, 105, 105, 90, 100, 100, 75, 100, 260]
-        for index, width in enumerate(widths):
+        for index, width in enumerate([95, 90, 60, 350, 105, 105, 90, 100, 100, 75, 100, 260]):
             self.table.setColumnWidth(index, width)
+        self.table.cellDoubleClicked.connect(self.preview_row)
         layout.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
+        preview = QPushButton("▶ Video bekijken")
+        preview.clicked.connect(self.preview_selected)
         self.select_bad = QPushButton("Slechte versies selecteren")
         self.select_bad.clicked.connect(self.select_bad_versions)
-        self.clear_selection = QPushButton("Alles uitvinken")
-        self.clear_selection.clicked.connect(self.clear_checks)
+        clear = QPushButton("Alles uitvinken")
+        clear.clicked.connect(self.clear_checks)
         self.delete_button = QPushButton("🗑 Geselecteerde naar Prullenbak")
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self.delete_selected)
+        actions.addWidget(preview)
         actions.addWidget(self.select_bad)
-        actions.addWidget(self.clear_selection)
+        actions.addWidget(clear)
         actions.addStretch(1)
         actions.addWidget(self.delete_button)
         layout.addLayout(actions)
-
         self.setCentralWidget(root)
 
     def _apply_theme(self):
         self.setStyleSheet("""
             QWidget { background: #15171b; color: #e8eaed; font-size: 13px; }
-            QMainWindow { background: #101216; }
+            QMainWindow, QDialog { background: #101216; }
             QLabel#title { font-size: 28px; font-weight: 700; color: #ffffff; }
             QLabel#subtitle { color: #8f96a3; }
             QLabel#credit { color: #ffffff; font-size: 18px; font-weight: 700; padding: 7px 12px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
@@ -404,123 +384,137 @@ class DuplicateFinderWindow(QMainWindow):
         ffprobe = scanner.ffprobe
         ffmpeg = find_ffmpeg()
         if not ffprobe or not ffmpeg:
-            QMessageBox.warning(self, "FFmpeg/FFprobe ontbreekt", "Voor visuele duplicaatcontrole zijn zowel FFprobe als FFmpeg nodig.")
+            missing = [name for name, value in (("FFprobe", ffprobe), ("FFmpeg", ffmpeg)) if not value]
+            QMessageBox.critical(self, "Benodigd programma ontbreekt", "Niet gevonden: " + ", ".join(missing))
             return
-        self.table.setRowCount(0)
         self.rows.clear()
-        self.progress.setValue(0)
-        self.status.setText("Video's analyseren…")
+        self.table.setRowCount(0)
         self.scan_button.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.status.setText("Video's analyseren…")
         self.worker = FinderWorker(folder, ffprobe, ffmpeg)
-        self.worker.progress.connect(self._update_progress)
-        self.worker.result.connect(self.show_results)
-        self.worker.error.connect(self.show_error)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.result.connect(self.scan_finished)
+        self.worker.error.connect(self.scan_error)
         self.worker.finished.connect(lambda: self.scan_button.setEnabled(True))
         self.worker.start()
 
-    def _update_progress(self, value: int, total: int):
+    def update_progress(self, current: int, total: int):
         self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(value)
+        self.progress.setValue(current)
+        self.status.setText(f"Video {current} van {total} analyseren…")
 
-    def show_results(self, rows: list[DuplicateCandidate]):
-        self.rows = rows
-        self.table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
+    def scan_finished(self, rows):
+        self.rows = list(rows)
+        self.populate_table()
+        self.status.setText(f"Klaar — {len(self.rows)} duplicaat-kandidaten gevonden.")
+
+    def scan_error(self, message: str):
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.status.setText("Analyse mislukt.")
+        QMessageBox.critical(self, "Dubbele video's", message)
+
+    def populate_table(self):
+        self.table.setRowCount(len(self.rows))
+        for row, candidate in enumerate(self.rows):
             check = QTableWidgetItem()
-            check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            check.setCheckState(Qt.CheckState.Checked if row.recommended_delete else Qt.CheckState.Unchecked)
-            self.table.setItem(row_index, 0, check)
-            self.table.setItem(row_index, 1, QTableWidgetItem(str(row.group)))
-            name = QTableWidgetItem(row.info.name)
-            name.setToolTip(row.info.path)
-            self.table.setItem(row_index, 2, name)
-            self.table.setItem(row_index, 3, QTableWidgetItem(row.info.resolution))
-            self.table.setItem(row_index, 4, QTableWidgetItem(row.info.bitrate_text))
-            self.table.setItem(row_index, 5, QTableWidgetItem(row.info.duration_text))
-            self.table.setItem(row_index, 6, QTableWidgetItem(row.info.video_codec))
-            self.table.setItem(row_index, 7, QTableWidgetItem(row.info.audio_codec))
-            self.table.setItem(row_index, 8, QTableWidgetItem(row.info.fps))
-            self.table.setItem(row_index, 9, QTableWidgetItem(row.info.container))
-            self.table.setItem(row_index, 10, QTableWidgetItem(f"{row.similarity}% • {row.reason}"))
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            check.setCheckState(Qt.CheckState.Checked if candidate.recommended_delete else Qt.CheckState.Unchecked)
+            check.setData(Qt.ItemDataRole.UserRole, candidate.info.path)
+            self.table.setItem(row, 0, check)
+            preview = QPushButton("▶ Bekijk")
+            preview.clicked.connect(lambda _checked=False, r=row: self.preview_row(r))
+            self.table.setCellWidget(row, 1, preview)
+            values = [str(candidate.group), candidate.info.name, candidate.info.resolution, candidate.info.bitrate_text, candidate.info.duration_text, candidate.info.video_codec, candidate.info.audio_codec, candidate.info.fps, candidate.info.container, f"{candidate.similarity}% — {candidate.reason}"]
+            for column, value in enumerate(values, 2):
+                item = QTableWidgetItem(value)
+                item.setToolTip(candidate.info.path if column == 3 else value)
+                self.table.setItem(row, column, item)
 
-        groups = len({row.group for row in rows})
-        checked = sum(1 for row in rows if row.recommended_delete)
-        if rows:
-            self.status.setText(f"{groups} dubbele groep(en) gevonden • {len(rows)} bestanden • {checked} automatisch aangevinkt")
-        else:
-            self.status.setText("Geen dubbele video's gevonden.")
+    def selected_path(self, row: int) -> str | None:
+        if row < 0 or row >= self.table.rowCount():
+            return None
+        item = self.table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
 
-    def show_error(self, message: str):
-        self.status.setText("Fout tijdens duplicaatcontrole.")
-        QMessageBox.critical(self, "Duplicaatcontrole", message)
+    def preview_row(self, row: int, _column: int = 0):
+        path = self.selected_path(row)
+        if not path:
+            return
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Video bekijken", "Het bestand bestaat niet meer:\n\n" + path)
+            return
+        dialog = VideoPreviewDialog(path, self)
+        self.preview_windows.append(dialog)
+        dialog.finished.connect(lambda _result, d=dialog: self._forget_preview(d))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_preview(self, dialog):
+        if dialog in self.preview_windows:
+            self.preview_windows.remove(dialog)
+
+    def preview_selected(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if not rows:
+            QMessageBox.information(self, "Video bekijken", "Selecteer eerst een video in de tabel.")
+            return
+        self.preview_row(rows[0])
 
     def select_bad_versions(self):
-        for index, row in enumerate(self.rows):
-            item = self.table.item(index, 0)
+        for row, candidate in enumerate(self.rows):
+            item = self.table.item(row, 0)
             if item:
-                item.setCheckState(Qt.CheckState.Checked if row.recommended_delete else Qt.CheckState.Unchecked)
+                item.setCheckState(Qt.CheckState.Checked if candidate.recommended_delete else Qt.CheckState.Unchecked)
 
     def clear_checks(self):
-        for index in range(self.table.rowCount()):
-            item = self.table.item(index, 0)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
             if item:
                 item.setCheckState(Qt.CheckState.Unchecked)
 
     def delete_selected(self):
         paths = []
-        for index in range(self.table.rowCount()):
-            item = self.table.item(index, 0)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
             if item and item.checkState() == Qt.CheckState.Checked:
-                paths.append(self.rows[index].info.path)
+                path = item.data(Qt.ItemDataRole.UserRole)
+                if path and os.path.isfile(path):
+                    paths.append(path)
         if not paths:
-            QMessageBox.information(self, "Geen selectie", "Er zijn geen bestanden aangevinkt.")
+            QMessageBox.information(self, "Prullenbak", "Er zijn geen bestanden geselecteerd.")
             return
-        answer = QMessageBox.question(
-            self,
-            "Naar Prullenbak",
-            f"Wil je {len(paths)} bestand(en) naar de Windows Prullenbak verplaatsen?\n\nZe worden niet definitief verwijderd.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
+        names = "\n".join(Path(path).name for path in paths[:12])
+        if len(paths) > 12:
+            names += f"\n… en nog {len(paths) - 12} bestand(en)."
+        answer = QMessageBox.warning(self, "Bevestig verwijderen", f"De volgende {len(paths)} video('s) worden naar de Windows Prullenbak verplaatst:\n\n{names}\n\nDoorgaan?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._recycle(paths)
-
-    def _recycle(self, paths: list[str]):
-        if os.name != "nt":
-            QMessageBox.warning(self, "Windows", "De Prullenbak-functie is alleen beschikbaar op Windows.")
-            return
-        import ctypes
-        from ctypes import wintypes
-
-        class SHFILEOPSTRUCTW(ctypes.Structure):
-            _fields_ = [
-                ("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
-                ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.UINT),
-                ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID),
-                ("lpszProgressTitle", wintypes.LPCWSTR),
-            ]
-
-        existing = [path for path in paths if Path(path).is_file()]
-        if not existing:
-            QMessageBox.warning(self, "Prullenbak", "De geselecteerde bestanden bestaan niet meer.")
-            return
-        source = "".join(path + "\0" for path in existing) + "\0"
-        operation = SHFILEOPSTRUCTW(None, 0x0003, source, None, 0x0004 | 0x0010 | 0x0040 | 0x0400, False, None, None)
-        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-        if result != 0 or operation.fAnyOperationsAborted:
-            QMessageBox.warning(self, "Prullenbak", "Niet alle bestanden konden naar de Prullenbak worden verplaatst.")
-            return
-        self.status.setText(f"{len(existing)} bestand(en) naar de Prullenbak verplaatst.")
-        self.start_scan()
+        errors = []
+        for path in paths:
+            try:
+                send_to_recycle_bin(path)
+            except Exception as exc:
+                errors.append(f"{Path(path).name}: {exc}")
+        if errors:
+            QMessageBox.warning(self, "Prullenbak", "Sommige bestanden konden niet worden verplaatst:\n\n" + "\n".join(errors[:10]))
+        else:
+            QMessageBox.information(self, "Prullenbak", f"{len(paths)} bestand(en) naar de Windows Prullenbak verplaatst.")
 
 
-def main():
-    app = QApplication([])
-    window = DuplicateFinderWindow()
-    window.show()
-    app.exec()
-
-
-if __name__ == "__main__":
-    main()
+def send_to_recycle_bin(path: str):
+    if os.name != "nt":
+        raise RuntimeError("De Windows Prullenbak is alleen beschikbaar op Windows.")
+    import ctypes
+    from ctypes import wintypes
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.USHORT), ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
+    operation = SHFILEOPSTRUCTW()
+    operation.wFunc = 0x0003
+    operation.pFrom = str(Path(path).resolve()) + "\0\0"
+    operation.fFlags = 0x0040 | 0x0010 | 0x0004
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0 or operation.fAnyOperationsAborted:
+        raise OSError(result or "Windows heeft de operatie afgebroken")
