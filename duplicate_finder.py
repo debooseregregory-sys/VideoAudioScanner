@@ -4,7 +4,6 @@ import hashlib
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +22,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QCheckBox,
 )
 
 from scanner import VIDEO_EXTENSIONS, MediaScanner
@@ -40,6 +38,11 @@ class VideoInfo:
     width: int
     height: int
     bitrate: int
+    bitrate_text: str
+    video_codec: str
+    audio_codec: str
+    fps: str
+    container: str
     video_hash: str = ""
 
 
@@ -86,6 +89,13 @@ def parse_resolution(value: str) -> tuple[int, int]:
         return 0, 0
 
 
+def parse_bitrate(value: str) -> int:
+    try:
+        return int(float(value.split()[0]) * 1000)
+    except (ValueError, IndexError, AttributeError):
+        return 0
+
+
 def exact_hash(path: str, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -98,24 +108,15 @@ def exact_hash(path: str, chunk_size: int = 1024 * 1024) -> str:
 
 
 def visual_fingerprint(ffmpeg: str, path: str, duration: float) -> bytes:
-    """Extract small grayscale frames at fixed points for visual comparison."""
-    if duration <= 0:
-        points = [0.0]
-    else:
-        points = [duration * fraction for fraction in (0.10, 0.35, 0.60, 0.85)]
-
+    """Extract four small grayscale frames used for visual similarity scoring."""
+    points = [0.0] if duration <= 0 else [duration * fraction for fraction in (0.10, 0.35, 0.60, 0.85)]
     result = bytearray()
     for point in points:
         command = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-ss", f"{point:.3f}",
-            "-i", path,
-            "-frames:v", "1",
-            "-vf", "scale=32:18,format=gray",
-            "-f", "rawvideo",
-            "pipe:1",
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-ss", f"{point:.3f}", "-i", path,
+            "-frames:v", "1", "-vf", "scale=32:18,format=gray",
+            "-f", "rawvideo", "pipe:1",
         ]
         completed = subprocess.run(
             command,
@@ -135,14 +136,16 @@ def visual_similarity(first: bytes, second: bytes) -> int:
     if not length:
         return 0
     difference = sum(abs(first[index] - second[index]) for index in range(length)) / length
-    return max(0, min(100, int(round(100 - (difference / 255 * 100)))) )
+    return max(0, min(100, int(round(100 - (difference / 255 * 100)))))
 
 
 def quality_score(info: VideoInfo) -> float:
     pixels = info.width * info.height
     bitrate = info.bitrate or 0
-    # Resolution is deliberately weighted strongly; bitrate breaks ties.
-    return pixels * 1000 + bitrate + info.size / max(info.duration, 1.0)
+    duration = max(info.duration, 1.0)
+    # Resolution is strongest, bitrate is second, and the encoded data rate per second
+    # helps distinguish otherwise equal resolutions without blindly preferring huge files.
+    return pixels * 1000 + bitrate + info.size / duration
 
 
 def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None) -> list[DuplicateCandidate]:
@@ -157,17 +160,12 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         (path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS),
         key=lambda p: str(p).casefold(),
     )
+
     infos: list[VideoInfo] = []
     total = len(paths)
-
     for index, path in enumerate(paths, 1):
         result = scanner._inspect(path)
         width, height = parse_resolution(result.resolution)
-        bitrate = 0
-        try:
-            bitrate = int(float(result.bitrate.split()[0]) * 1000)
-        except (ValueError, IndexError, AttributeError):
-            pass
         infos.append(VideoInfo(
             path=result.path,
             name=result.name,
@@ -177,12 +175,18 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
             resolution=result.resolution,
             width=width,
             height=height,
-            bitrate=bitrate,
+            bitrate=parse_bitrate(result.bitrate),
+            bitrate_text=result.bitrate,
+            video_codec=result.video_codec,
+            audio_codec=result.audio_codec,
+            fps=result.fps,
+            container=result.container,
         ))
         if progress:
             progress(index, total)
 
-    # First pass: exact duplicates. This avoids expensive frame analysis for identical files.
+    # Exact duplicates are detected with SHA-256, but only files with equal byte size
+    # are hashed so a large collection does not require hashing every video twice.
     by_size: dict[int, list[VideoInfo]] = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
@@ -203,8 +207,8 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
             groups.append(candidates)
             used.update(info.path for info in candidates)
 
-    # Second pass: visual candidates. We only compare videos with nearly equal duration
-    # or normalized names, which keeps the number of expensive FFmpeg comparisons reasonable.
+    # Visual pass for files that are not byte-for-byte identical. Duration/name are
+    # used as inexpensive gates before FFmpeg frame comparison.
     remaining = [info for info in infos if info.path not in used]
     fingerprints: dict[str, bytes] = {}
     for index, info in enumerate(remaining, 1):
@@ -229,7 +233,6 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
                 candidate_pairs.append((first, second, similarity))
 
     for first, second, _similarity in candidate_pairs:
-        # Merge with an existing visual group when possible.
         target = next((group for group in groups if first in group or second in group), None)
         if target is None:
             groups.append([first, second])
@@ -243,19 +246,18 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
     for group_number, group in enumerate(groups, 1):
         best = max(group, key=quality_score)
         for info in group:
-            similarity = 100 if info.video_hash and len(group) > 1 else 95
+            similarity = 100 if info.video_hash else 95
             if info is not best:
-                # The visual score is a conservative indication, not a proof of identity.
-                other_scores = []
+                scores = []
                 for other in group:
                     if other is info:
                         continue
                     if info.video_hash and info.video_hash == other.video_hash:
-                        other_scores.append(100)
+                        scores.append(100)
                     else:
-                        other_scores.append(visual_similarity(fingerprints.get(info.path, b""), fingerprints.get(other.path, b"")))
-                if other_scores:
-                    similarity = max(other_scores)
+                        scores.append(visual_similarity(fingerprints.get(info.path, b""), fingerprints.get(other.path, b"")))
+                if scores:
+                    similarity = max(scores)
             delete = info is not best and quality_score(info) < quality_score(best)
             reason = "Beste kwaliteit behouden" if not delete else "Lagere kwaliteit dan beste versie"
             if info.video_hash and group[0].video_hash == info.video_hash:
@@ -287,7 +289,7 @@ class DuplicateFinderWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VideoAudioScanner — Dubbele video's")
-        self.resize(1450, 820)
+        self.resize(1600, 860)
         self.worker: FinderWorker | None = None
         self.rows: list[DuplicateCandidate] = []
         self._build_ui()
@@ -304,12 +306,15 @@ class DuplicateFinderWindow(QMainWindow):
         title.setObjectName("title")
         header.addWidget(title)
         header.addStretch(1)
-        credit = QLabel("© Kid Acid • VideoAudioScanner")
+        credit = QLabel("Made by Kid Acid")
         credit.setObjectName("credit")
         header.addWidget(credit)
         layout.addLayout(header)
 
-        info = QLabel("De scanner vergelijkt bestandinhoud én videobeelden. De vermoedelijk slechte versie wordt automatisch aangevinkt, maar wordt nooit automatisch verwijderd.")
+        info = QLabel(
+            "Exacte duplicaten worden met SHA-256 herkend. Andere kandidaten worden visueel vergeleken met FFmpeg. "
+            "Resolutie, bitrate, duur, codecs, FPS en container bepalen welke versie vermoedelijk het beste is."
+        )
         info.setWordWrap(True)
         info.setObjectName("subtitle")
         layout.addWidget(info)
@@ -334,17 +339,17 @@ class DuplicateFinderWindow(QMainWindow):
         self.status = QLabel("Klaar om te zoeken.")
         layout.addWidget(self.status)
 
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Verwijderen", "Groep", "Bestand", "Resolutie", "Duur", "Grootte", "Overeenkomst / beoordeling"])
+        self.table = QTableWidget(0, 11)
+        self.table.setHorizontalHeaderLabels([
+            "Verwijderen", "Groep", "Bestand", "Resolutie", "Bitrate", "Duur",
+            "Video codec", "Audio codec", "FPS", "Container", "Overeenkomst / beoordeling",
+        ])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 95)
-        self.table.setColumnWidth(1, 70)
-        self.table.setColumnWidth(2, 420)
-        self.table.setColumnWidth(3, 120)
-        self.table.setColumnWidth(4, 100)
-        self.table.setColumnWidth(5, 110)
+        widths = [95, 60, 350, 105, 105, 90, 100, 100, 75, 100, 260]
+        for index, width in enumerate(widths):
+            self.table.setColumnWidth(index, width)
         layout.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
@@ -369,7 +374,7 @@ class DuplicateFinderWindow(QMainWindow):
             QMainWindow { background: #101216; }
             QLabel#title { font-size: 28px; font-weight: 700; color: #ffffff; }
             QLabel#subtitle { color: #8f96a3; }
-            QLabel#credit { color: #8f96a3; padding: 6px 10px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
+            QLabel#credit { color: #ffffff; font-size: 18px; font-weight: 700; padding: 7px 12px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
             QLabel#path { color: #c8ccd3; padding: 8px; }
             QGroupBox { border: 1px solid #30343c; border-radius: 8px; margin-top: 8px; padding: 10px; }
             QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #aeb5c0; }
@@ -390,8 +395,8 @@ class DuplicateFinderWindow(QMainWindow):
 
     def start_scan(self):
         folder = self.folder.text().strip()
-        if not folder or folder == "Geen map gekozen":
-            QMessageBox.information(self, "Map kiezen", "Kies eerst een map.")
+        if not folder or folder == "Geen map gekozen" or not os.path.isdir(folder):
+            QMessageBox.information(self, "Map kiezen", "Kies eerst een geldige map.")
             return
         if self.worker and self.worker.isRunning():
             return
@@ -407,11 +412,15 @@ class DuplicateFinderWindow(QMainWindow):
         self.status.setText("Video's analyseren…")
         self.scan_button.setEnabled(False)
         self.worker = FinderWorker(folder, ffprobe, ffmpeg)
-        self.worker.progress.connect(lambda value, total: self.progress.setRange(0, total or 1) or self.progress.setValue(value))
+        self.worker.progress.connect(self._update_progress)
         self.worker.result.connect(self.show_results)
         self.worker.error.connect(self.show_error)
         self.worker.finished.connect(lambda: self.scan_button.setEnabled(True))
         self.worker.start()
+
+    def _update_progress(self, value: int, total: int):
+        self.progress.setRange(0, max(total, 1))
+        self.progress.setValue(value)
 
     def show_results(self, rows: list[DuplicateCandidate]):
         self.rows = rows
@@ -426,13 +435,20 @@ class DuplicateFinderWindow(QMainWindow):
             name.setToolTip(row.info.path)
             self.table.setItem(row_index, 2, name)
             self.table.setItem(row_index, 3, QTableWidgetItem(row.info.resolution))
-            self.table.setItem(row_index, 4, QTableWidgetItem(row.info.duration_text))
-            self.table.setItem(row_index, 5, QTableWidgetItem(self._format_size(row.info.size)))
-            text = f"{row.similarity}% • {row.reason}"
-            self.table.setItem(row_index, 6, QTableWidgetItem(text))
+            self.table.setItem(row_index, 4, QTableWidgetItem(row.info.bitrate_text))
+            self.table.setItem(row_index, 5, QTableWidgetItem(row.info.duration_text))
+            self.table.setItem(row_index, 6, QTableWidgetItem(row.info.video_codec))
+            self.table.setItem(row_index, 7, QTableWidgetItem(row.info.audio_codec))
+            self.table.setItem(row_index, 8, QTableWidgetItem(row.info.fps))
+            self.table.setItem(row_index, 9, QTableWidgetItem(row.info.container))
+            self.table.setItem(row_index, 10, QTableWidgetItem(f"{row.similarity}% • {row.reason}"))
+
         groups = len({row.group for row in rows})
         checked = sum(1 for row in rows if row.recommended_delete)
-        self.status.setText(f"{groups} dubbele groep(en) gevonden • {len(rows)} bestanden • {checked} automatisch aangevinkt")
+        if rows:
+            self.status.setText(f"{groups} dubbele groep(en) gevonden • {len(rows)} bestanden • {checked} automatisch aangevinkt")
+        else:
+            self.status.setText("Geen dubbele video's gevonden.")
 
     def show_error(self, message: str):
         self.status.setText("Fout tijdens duplicaatcontrole.")
@@ -459,7 +475,13 @@ class DuplicateFinderWindow(QMainWindow):
         if not paths:
             QMessageBox.information(self, "Geen selectie", "Er zijn geen bestanden aangevinkt.")
             return
-        answer = QMessageBox.question(self, "Naar Prullenbak", f"Wil je {len(paths)} bestand(en) naar de Windows Prullenbak verplaatsen?\n\nZe worden niet definitief verwijderd.")
+        answer = QMessageBox.question(
+            self,
+            "Naar Prullenbak",
+            f"Wil je {len(paths)} bestand(en) naar de Windows Prullenbak verplaatsen?\n\nZe worden niet definitief verwijderd.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._recycle(paths)
@@ -470,32 +492,34 @@ class DuplicateFinderWindow(QMainWindow):
             return
         import ctypes
         from ctypes import wintypes
+
         class SHFILEOPSTRUCTW(ctypes.Structure):
-            _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.UINT), ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
-        source = "".join(path + "\0" for path in paths) + "\0"
+            _fields_ = [
+                ("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.UINT),
+                ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID),
+                ("lpszProgressTitle", wintypes.LPCWSTR),
+            ]
+
+        existing = [path for path in paths if Path(path).is_file()]
+        if not existing:
+            QMessageBox.warning(self, "Prullenbak", "De geselecteerde bestanden bestaan niet meer.")
+            return
+        source = "".join(path + "\0" for path in existing) + "\0"
         operation = SHFILEOPSTRUCTW(None, 0x0003, source, None, 0x0004 | 0x0010 | 0x0040 | 0x0400, False, None, None)
         result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
         if result != 0 or operation.fAnyOperationsAborted:
             QMessageBox.warning(self, "Prullenbak", "Niet alle bestanden konden naar de Prullenbak worden verplaatst.")
             return
-        self.status.setText(f"{len(paths)} bestand(en) naar de Prullenbak verplaatst.")
+        self.status.setText(f"{len(existing)} bestand(en) naar de Prullenbak verplaatst.")
         self.start_scan()
-
-    @staticmethod
-    def _format_size(value: int) -> str:
-        size = float(value)
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if size < 1024 or unit == "TB":
-                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-            size /= 1024
-        return f"{value} B"
 
 
 def main():
-    app = QApplication(sys.argv)
+    app = QApplication([])
     window = DuplicateFinderWindow()
     window.show()
-    sys.exit(app.exec())
+    app.exec()
 
 
 if __name__ == "__main__":
