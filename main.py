@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QTableView, QVBoxLayout, QWidget,
 )
 
+from duplicate_finder import DuplicateFinderWindow
 from scanner import MediaResult, MediaScanner
 
 
@@ -141,15 +142,20 @@ def move_to_recycle_bin(paths: list[str]) -> tuple[list[str], list[str]]:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.settings = QSettings("VideoAudioScanner", "VideoAudioScanner"); self.setWindowTitle("VideoAudioScanner"); self.resize(1550, 850)
-        self.model = ResultsModel(); self.proxy = FilterProxy(); self.proxy.setSourceModel(self.model); self.thread: Optional[QThread] = None; self.worker: Optional[ScanWorker] = None
+        self.model = ResultsModel(); self.proxy = FilterProxy(); self.proxy.setSourceModel(self.model); self.thread: Optional[QThread] = None; self.worker: Optional[ScanWorker] = None; self.duplicate_window: Optional[DuplicateFinderWindow] = None
         self._build_ui(); self._build_menu(); self._apply_theme(); self._restore_state(); self.refresh_ffprobe_status(); self._update_action_state()
 
     def _build_ui(self):
         root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(18, 16, 18, 18); layout.setSpacing(10)
-        title = QLabel("VideoAudioScanner"); title.setObjectName("title"); subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe"); subtitle.setObjectName("subtitle"); layout.addWidget(title); layout.addWidget(subtitle)
+        header = QHBoxLayout()
+        title = QLabel("VideoAudioScanner"); title.setObjectName("title")
+        credit = QLabel("Made by Kid Acid"); credit.setObjectName("credit")
+        header.addWidget(title); header.addStretch(1); header.addWidget(credit)
+        layout.addLayout(header)
+        subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe"); subtitle.setObjectName("subtitle"); layout.addWidget(subtitle)
         source_box = QGroupBox("Scanlocatie"); source_layout = QHBoxLayout(source_box); self.folder = QLineEdit(); self.folder.setPlaceholderText("Kies een map om recursief te scannen…"); self.folder.returnPressed.connect(self.start_scan)
-        browse = QPushButton("Bladeren…"); browse.clicked.connect(self.choose_folder); self.scan_button = QPushButton("▶  Scan starten"); self.scan_button.setObjectName("primary"); self.scan_button.clicked.connect(self.start_scan); self.cancel_button = QPushButton("■  Stop"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_scan); self.export_button = QPushButton("CSV exporteren"); self.export_button.setEnabled(False); self.export_button.clicked.connect(self.export_csv)
-        source_layout.addWidget(self.folder, 1); source_layout.addWidget(browse); source_layout.addWidget(self.scan_button); source_layout.addWidget(self.cancel_button); source_layout.addWidget(self.export_button); layout.addWidget(source_box)
+        browse = QPushButton("Bladeren…"); browse.clicked.connect(self.choose_folder); self.scan_button = QPushButton("▶  Scan starten"); self.scan_button.setObjectName("primary"); self.scan_button.clicked.connect(self.start_scan); self.duplicate_button = QPushButton("🎞  Dubbele video's"); self.duplicate_button.setObjectName("secondary"); self.duplicate_button.clicked.connect(self.open_duplicate_finder); self.cancel_button = QPushButton("■  Stop"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_scan); self.export_button = QPushButton("CSV exporteren"); self.export_button.setEnabled(False); self.export_button.clicked.connect(self.export_csv)
+        source_layout.addWidget(self.folder, 1); source_layout.addWidget(browse); source_layout.addWidget(self.scan_button); source_layout.addWidget(self.duplicate_button); source_layout.addWidget(self.cancel_button); source_layout.addWidget(self.export_button); layout.addWidget(source_box)
         ff_box = QGroupBox("FFprobe"); ff_layout = QHBoxLayout(ff_box); self.ffprobe_status = QLabel("Controleren…"); self.ffprobe_status.setObjectName("ffprobeStatus"); self.ffprobe_path = QLabel(""); self.ffprobe_path.setObjectName("status"); ff_layout.addWidget(self.ffprobe_status); ff_layout.addWidget(self.ffprobe_path, 1); ff_settings = QPushButton("Instellingen…"); ff_settings.clicked.connect(self.configure_ffprobe); ff_layout.addWidget(ff_settings); layout.addWidget(ff_box)
         stats = QGroupBox("Scanstatistieken"); stats_layout = QGridLayout(stats); self.total_label = self._stat_label("0"); self.video_label = self._stat_label("0"); self.audio_label = self._stat_label("0"); self.error_label = self._stat_label("0"); self.size_label = self._stat_label("0 B")
         for col, (caption, widget) in enumerate([("Totaal", self.total_label), ("Video", self.video_label), ("Audio", self.audio_label), ("Fouten", self.error_label), ("Totale grootte", self.size_label)]):
@@ -162,20 +168,13 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader(); header.setStretchLastSection(False); header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for col, width in enumerate([300, 75, 85, 115, 105, 105, 95, 105, 80, 80, 115, 105, 250]): self.table.setColumnWidth(col, width)
         layout.addWidget(self.table, 1); self.setCentralWidget(root)
-        # Compact disclaimer/credit in the top-right corner of the application.
-        credit = QLabel("© Kid Acid  •  VideoAudioScanner\nGebruik op eigen verantwoordelijkheid  •  Bestanden worden alleen op jouw opdracht naar de Prullenbak verplaatst.")
-        credit.setObjectName("credit")
-        credit.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-        credit.setWordWrap(True)
-        credit.setMaximumWidth(500)
-        layout.insertWidget(0, credit, 0, Qt.AlignmentFlag.AlignRight)
 
     @staticmethod
     def _stat_label(text: str) -> QLabel:
         label = QLabel(text); label.setObjectName("statValue"); return label
 
     def _build_menu(self):
-        menu = self.menuBar().addMenu("Bestand"); export = QAction("CSV exporteren", self); export.triggered.connect(self.export_csv); menu.addAction(export); open_file = QAction("Geselecteerde bestanden openen", self); open_file.triggered.connect(self.open_selected); menu.addAction(open_file); menu.addSeparator(); self.delete_action = QAction("Geselecteerde bestanden naar Prullenbak", self); self.delete_action.triggered.connect(self.delete_selected); menu.addAction(self.delete_action); menu.addSeparator(); ff = QAction("FFprobe instellingen", self); ff.triggered.connect(self.configure_ffprobe); menu.addAction(ff); menu.addSeparator(); quit_action = QAction("Afsluiten", self); quit_action.triggered.connect(self.close); menu.addAction(quit_action)
+        menu = self.menuBar().addMenu("Bestand"); export = QAction("CSV exporteren", self); export.triggered.connect(self.export_csv); menu.addAction(export); open_file = QAction("Geselecteerde bestanden openen", self); open_file.triggered.connect(self.open_selected); menu.addAction(open_file); duplicate = QAction("Dubbele video's", self); duplicate.triggered.connect(self.open_duplicate_finder); menu.addAction(duplicate); menu.addSeparator(); self.delete_action = QAction("Geselecteerde bestanden naar Prullenbak", self); self.delete_action.triggered.connect(self.delete_selected); menu.addAction(self.delete_action); menu.addSeparator(); ff = QAction("FFprobe instellingen", self); ff.triggered.connect(self.configure_ffprobe); menu.addAction(ff); menu.addSeparator(); quit_action = QAction("Afsluiten", self); quit_action.triggered.connect(self.close); menu.addAction(quit_action)
 
     def _apply_theme(self):
         self.setStyleSheet("""
@@ -184,19 +183,28 @@ class MainWindow(QMainWindow):
             QMenuBar::item { padding: 7px 12px; } QMenu::item { padding: 7px 22px; }
             QLabel#title { font-size: 30px; font-weight: 700; color: #ffffff; }
             QLabel#subtitle { color: #8f96a3; margin-bottom: 2px; }
-            QLabel#credit { color: #8f96a3; font-size: 11px; padding: 4px 8px 2px 8px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
+            QLabel#credit { color: #ffffff; font-size: 18px; font-weight: 700; padding: 7px 12px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
             QGroupBox { border: 1px solid #30343c; border-radius: 8px; margin-top: 8px; padding: 10px 8px 8px 8px; }
             QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #aeb5c0; }
             QLineEdit, QComboBox, QTableView { background: #1e2127; border: 1px solid #353a43; border-radius: 6px; }
             QLineEdit { padding: 9px; } QComboBox { padding: 7px 10px; min-width: 90px; }
             QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 6px; padding: 9px 14px; }
-            QPushButton:hover { background: #353b45; } QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; } QPushButton#primary:hover { background: #3b70b6; } QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; } QPushButton#danger:hover { background: #6a3036; } QPushButton:disabled { color: #666c75; background: #202329; }
+            QPushButton:hover { background: #353b45; } QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; } QPushButton#primary:hover { background: #3b70b6; } QPushButton#secondary { background: #3b313f; border-color: #66536b; font-weight: 600; } QPushButton#secondary:hover { background: #4b3d50; } QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; } QPushButton#danger:hover { background: #6a3036; } QPushButton:disabled { color: #666c75; background: #202329; }
             QProgressBar { background: #1e2127; border: 1px solid #353a43; border-radius: 5px; height: 18px; text-align: center; } QProgressBar::chunk { background: #477dcc; border-radius: 4px; }
             QHeaderView::section { background: #252a31; color: #cfd4dc; padding: 8px; border: 0; border-right: 1px solid #343941; } QTableView { gridline-color: #30343b; } QTableView::item { padding: 6px; } QTableView::item:selected { background: #304a70; }
             QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { font-weight: 700; }
         """)
 
-    # Existing behavior below remains unchanged.
+    def open_duplicate_finder(self):
+        folder = self.folder.text().strip()
+        self.duplicate_window = DuplicateFinderWindow()
+        if folder and os.path.isdir(folder):
+            self.duplicate_window.folder.setText(folder)
+        self.duplicate_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.duplicate_window.show()
+        self.duplicate_window.raise_()
+        self.duplicate_window.activateWindow()
+
     def _restore_state(self):
         geometry = self.settings.value("geometry")
         if geometry: self.restoreGeometry(geometry)
