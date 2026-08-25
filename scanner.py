@@ -24,6 +24,11 @@ class MediaResult:
     resolution: str
     video_codec: str
     audio_codec: str
+    bitrate: str
+    sample_rate: str
+    channels: str
+    fps: str
+    container: str
     size_bytes: int
     size_text: str
     status: str
@@ -41,34 +46,19 @@ class MediaScanner:
         candidates: list[Path] = []
         if explicit:
             candidates.append(Path(explicit).expanduser())
-
         env_path = os.environ.get("VIDEOAUDIOSCANNER_FFPROBE", "").strip()
         if env_path:
             candidates.append(Path(env_path).expanduser())
-
         found = shutil.which("ffprobe.exe" if os.name == "nt" else "ffprobe")
         if found:
             candidates.append(Path(found))
-
         app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-        candidates.extend([
-            app_dir / "ffprobe.exe",
-            app_dir / "ffmpeg" / "bin" / "ffprobe.exe",
-            app_dir / "tools" / "ffprobe.exe",
-            Path.cwd() / "tools" / "ffprobe.exe",
-        ])
-
+        candidates.extend([app_dir / "ffprobe.exe", app_dir / "ffmpeg" / "bin" / "ffprobe.exe", app_dir / "tools" / "ffprobe.exe", Path.cwd() / "tools" / "ffprobe.exe"])
         if os.name == "nt":
-            program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-            program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-            local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-            candidates.extend([
-                program_files / "ffmpeg" / "bin" / "ffprobe.exe",
-                program_files / "FFmpeg" / "bin" / "ffprobe.exe",
-                program_files_x86 / "ffmpeg" / "bin" / "ffprobe.exe",
-                local_app_data / "ffmpeg" / "bin" / "ffprobe.exe",
-            ])
-
+            pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            pfx86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+            lad = Path(os.environ.get("LOCALAPPDATA", ""))
+            candidates.extend([pf / "ffmpeg" / "bin" / "ffprobe.exe", pf / "FFmpeg" / "bin" / "ffprobe.exe", pfx86 / "ffmpeg" / "bin" / "ffprobe.exe", lad / "ffmpeg" / "bin" / "ffprobe.exe"])
         seen: set[str] = set()
         for candidate in candidates:
             try:
@@ -103,10 +93,7 @@ class MediaScanner:
         except OSError:
             pass
         media_type = "Video" if path.suffix.lower() in VIDEO_EXTENSIONS else "Audio"
-        base = dict(path=str(path), name=path.name, media_type=media_type,
-                    duration_seconds=0.0, duration_text="—", resolution="—",
-                    video_codec="—", audio_codec="—", size_bytes=size,
-                    size_text=format_size(size), status="OK")
+        base = dict(path=str(path), name=path.name, media_type=media_type, duration_seconds=0.0, duration_text="—", resolution="—", video_codec="—", audio_codec="—", bitrate="—", sample_rate="—", channels="—", fps="—", container="—", size_bytes=size, size_text=format_size(size), status="OK")
         if not self.ffprobe:
             base["status"] = "FFprobe niet gevonden"
             return MediaResult(**base)
@@ -119,13 +106,23 @@ class MediaScanner:
             audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
             base["duration_seconds"] = duration
             base["duration_text"] = format_duration(duration)
+            base["container"] = fmt.get("format_name") or "—"
+            bitrate = fmt.get("bit_rate")
+            if bitrate:
+                base["bitrate"] = format_bitrate(bitrate)
             if video:
                 width, height = video.get("width"), video.get("height")
                 if width and height:
                     base["resolution"] = f"{width} × {height}"
                 base["video_codec"] = video.get("codec_name") or "—"
+                base["fps"] = format_fps(video.get("avg_frame_rate") or video.get("r_frame_rate"))
             if audio:
                 base["audio_codec"] = audio.get("codec_name") or "—"
+                rate = audio.get("sample_rate")
+                if rate:
+                    base["sample_rate"] = f"{int(float(rate)):,} Hz".replace(",", ".")
+                channels = audio.get("channel_layout") or audio.get("channels")
+                base["channels"] = str(channels) if channels else "—"
             if not video and not audio:
                 base["status"] = "Geen media-stream gevonden"
         except subprocess.TimeoutExpired:
@@ -135,21 +132,15 @@ class MediaScanner:
         except PermissionError:
             base["status"] = "Fout: geen toegang"
         except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
-            message = str(exc).strip() or "FFprobe kon het bestand niet lezen."
-            base["status"] = f"Fout: {message[:120]}"
+            base["status"] = f"Fout: {(str(exc).strip() or 'FFprobe kon het bestand niet lezen.')[:120]}"
         except Exception as exc:
             base["status"] = f"Fout: {str(exc)[:120]}"
         return MediaResult(**base)
 
     def _run_ffprobe(self, path: Path) -> dict:
-        completed = subprocess.run(
-            [self.ffprobe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
+        completed = subprocess.run([self.ffprobe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         if completed.returncode != 0:
-            message = completed.stderr.strip() or "FFprobe kon het bestand niet lezen."
-            raise RuntimeError(message)
+            raise RuntimeError(completed.stderr.strip() or "FFprobe kon het bestand niet lezen.")
         return json.loads(completed.stdout)
 
 
@@ -167,3 +158,25 @@ def format_size(value: int) -> str:
             return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
         size /= 1024
     return f"{value} B"
+
+
+def format_bitrate(value: str | int | float) -> str:
+    try:
+        kbps = float(value) / 1000
+        return f"{kbps:.0f} kb/s"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def format_fps(value: str | None) -> str:
+    if not value or value in {"0/0", "N/A"}:
+        return "—"
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            fps = float(numerator) / float(denominator)
+        else:
+            fps = float(value)
+        return f"{fps:.3f}".rstrip("0").rstrip(".") + " fps"
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "—"
