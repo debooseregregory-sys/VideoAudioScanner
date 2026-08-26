@@ -168,12 +168,9 @@ def _analyse_videos_incremental(folder: str, ffprobe: str | None, ffmpeg: str | 
             infos.append(info)
             records[item["path"]] = {"size": item["size"], "mtime_ns": item["mtime_ns"], "status": "ok", "info": _info_to_dict(info)}
         else:
-            # Never cache a failed/locked file as successful. It will be retried next run.
             records.pop(item["path"], None)
         _report(progress, index, len(inventory))
 
-    # Rebuild duplicate relationships from cached metadata, but only fingerprint
-    # videos that have no stored visual fingerprint or whose file changed.
     changed_paths = {item["path"] for item in inventory if item["path"] not in previous or previous[item["path"]].get("size") != item["size"] or previous[item["path"]].get("mtime_ns") != item["mtime_ns"]}
     fingerprints = {}
     for info in infos:
@@ -223,10 +220,18 @@ def _analyse_videos_incremental(folder: str, ffprobe: str | None, ffmpeg: str | 
         if similarity >= (91 if same_name else 96):
             pairs.append((first, second))
 
-    name_groups: dict[str, list[df.VideoInfo]] = {}
+    # Never compare an unbounded group pairwise. For large same-name groups,
+    # subdivide by duration/resolution first; this keeps the scan responsive
+    # while retaining likely duplicate candidates.
+    name_groups: dict[tuple, list[df.VideoInfo]] = {}
     for info in remaining:
-        name_groups.setdefault(_name_key(info.name), []).append(info)
+        duration_bucket = int(round(info.duration / 5.0)) if info.duration > 0 else 0
+        aspect_bucket = round((info.width / info.height), 2) if info.width and info.height else 0
+        key = (_name_key(info.name), duration_bucket, aspect_bucket)
+        name_groups.setdefault(key, []).append(info)
     for candidates in name_groups.values():
+        if len(candidates) > 60:
+            continue
         for index, first in enumerate(candidates):
             for second in candidates[index + 1:]:
                 consider(first, second)
@@ -268,7 +273,6 @@ def _analyse_videos_incremental(folder: str, ffprobe: str | None, ffmpeg: str | 
                 reason = "Beste kwaliteit behouden" if info is best else "Vermoedelijk lagere kwaliteit"
             results.append(df.DuplicateCandidate(group_number, similarity, info, info is not best, reason))
 
-    # Remove stale cache entries and save successful analyses only.
     records = {path: record for path, record in records.items() if path in current_paths and record.get("status") == "ok"}
     _save_cache(folder, records)
     return results
@@ -296,7 +300,7 @@ def send_to_recycle_bin(path: str):
     if result != 0:
         raise OSError(f"Windows SHFileOperation foutcode {result}")
     if operation.fAnyOperationsAborted:
-        raise OSError("Windows heeft het verplaatsen afgebroken")
+        raise OSError("Windows heeft de operatie afgebroken")
 
 
 def _delete_selected(self):
