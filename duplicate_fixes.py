@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
-import hashlib
 import os
 import shutil
 import subprocess
@@ -71,6 +70,8 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         if progress:
             progress(index, len(paths))
 
+    # Exact duplicates are cheap to identify because files with different sizes
+    # cannot have the same bytes. Hash only equal-size candidates.
     by_size = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
@@ -89,10 +90,15 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
                 used.update(i.path for i in same)
 
     remaining = [i for i in infos if i.path not in used]
-    fingerprints = {info.path: _visual_hashes(ffmpeg, info.path, info.duration) for info in remaining}
-    name_groups = {}
-    for info in remaining:
-        name_groups.setdefault(_name_key(info.name), []).append(info)
+    fingerprints = {}
+    for index, info in enumerate(remaining, 1):
+        try:
+            fingerprints[info.path] = _visual_hashes(ffmpeg, info.path, info.duration)
+        except (OSError, subprocess.SubprocessError):
+            fingerprints[info.path] = []
+        if progress:
+            progress(index, len(remaining))
+
     pairs = []
     seen_pairs = set()
 
@@ -109,19 +115,36 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         if similarity >= (91 if same_name else 96):
             pairs.append((first, second))
 
+    # Same/renamed filenames are the safest non-exact candidates. Compare these
+    # groups completely; they are normally small.
+    name_groups = {}
+    for info in remaining:
+        name_groups.setdefault(_name_key(info.name), []).append(info)
     for candidates in name_groups.values():
         for index, first in enumerate(candidates):
             for second in candidates[index + 1:]:
                 consider(first, second)
 
+    # For differently named copies, use tight metadata buckets before visual
+    # comparison. The old implementation compared every video with every other
+    # video, which becomes effectively O(n²) and can make the GUI appear frozen.
+    # A bucket is deliberately capped so one huge collection cannot stall here.
     buckets = {}
     for info in remaining:
-        buckets.setdefault(round(info.duration / 10), []).append(info)
-    for bucket, candidates in buckets.items():
-        values = {i.path: i for i in candidates + buckets.get(bucket - 1, []) + buckets.get(bucket + 1, [])}.values()
-        values = list(values)
-        for index, first in enumerate(values):
-            for second in values[index + 1:]:
+        if info.duration <= 0:
+            continue
+        duration_bucket = int(round(info.duration / 5.0))
+        aspect_bucket = round((info.width / info.height), 2) if info.width and info.height else 0
+        key = (duration_bucket, aspect_bucket, info.width, info.height)
+        buckets.setdefault(key, []).append(info)
+
+    for candidates in buckets.values():
+        if len(candidates) > 60:
+            # Large buckets are ambiguous. Filename matches above are still
+            # checked, but we avoid an unbounded pair explosion here.
+            continue
+        for index, first in enumerate(candidates):
+            for second in candidates[index + 1:]:
                 if _name_key(first.name) != _name_key(second.name):
                     consider(first, second)
 
@@ -130,8 +153,10 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         if target is None:
             groups.append([first, second])
         else:
-            if first not in target: target.append(first)
-            if second not in target: target.append(second)
+            if first not in target:
+                target.append(first)
+            if second not in target:
+                target.append(second)
 
     results = []
     for group_number, group in enumerate(groups, 1):
