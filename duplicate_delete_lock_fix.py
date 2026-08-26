@@ -12,9 +12,14 @@ def _release_previews(window, paths):
     remaining = []
     for preview in list(getattr(window, "preview_windows", [])):
         try:
-            source = getattr(preview, "_preview_path", "")
+            player = getattr(preview, "player", None)
+            source = ""
+            if player is not None:
+                try:
+                    source = player.source().toLocalFile()
+                except Exception:
+                    source = ""
             if source and str(Path(source).resolve()).casefold() in wanted:
-                player = getattr(preview, "player", None)
                 if player is not None:
                     player.stop()
                     player.setSource(QUrl())
