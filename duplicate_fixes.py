@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 import duplicate_finder as df
+from PySide6.QtCore import QUrl, QTimer
+from PySide6.QtWidgets import QApplication
 
 CACHE_NAME = ".videoaudioscanner_duplicates.json"
 CACHE_VERSION = 6
@@ -162,7 +164,6 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             records.pop(item["path"], None)
         _report(progress, index, len(inventory))
 
-    # Exact duplicates are cheap to identify because only equal-size files are hashed.
     by_size = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
@@ -199,7 +200,6 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
         candidate_pairs.append((a, b))
         return True
 
-    # Strong candidates first: same normalized filename, close duration and aspect ratio.
     name_groups = {}
     for info in remaining:
         duration_bucket = int(round(info.duration / 5.0)) if info.duration > 0 else 0
@@ -217,7 +217,6 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
         if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
             break
 
-    # Different names: nearest file sizes inside a tight duration/aspect/resolution bucket.
     if len(candidate_pairs) < MAX_VISUAL_PAIRS:
         buckets = {}
         for info in remaining:
@@ -244,14 +243,11 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
                 break
 
-    # Only fingerprint files that actually participate in a candidate pair.
     candidate_paths = set()
     for first, second in candidate_pairs:
         candidate_paths.add(first.path)
         candidate_paths.add(second.path)
 
-    # Safety limit: if an unusually large library produces too many candidates,
-    # prioritize the files appearing in the strongest same-name candidates first.
     if len(candidate_paths) > MAX_VISUAL_FILES:
         ranked = []
         for path in candidate_paths:
@@ -276,13 +272,10 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             if fp:
                 fingerprints[path] = fp
                 record["visual_hashes"] = fp
-        # Re-use the same two-int progress signal, but make the final phase visible
-        # by counting fingerprint work from 0..total_fp.
         _report(progress, index, max(total_fp, 1))
 
     groups = list(exact_groups)
-    info_by_path = {x.path: x for x in remaining}
-    for index, (first, second) in enumerate(candidate_pairs, 1):
+    for first, second in candidate_pairs:
         if first.path in used or second.path in used:
             continue
         ratio = abs(first.duration - second.duration) / max(first.duration, second.duration, 1)
@@ -342,6 +335,31 @@ def send_to_recycle_bin(path):
         raise OSError("Windows heeft de operatie afgebroken")
 
 
+def _release_selected_previews(window, paths):
+    wanted = {str(Path(path).resolve()).casefold() for path in paths}
+    for preview in list(getattr(window, "preview_windows", [])):
+        preview_path = str(getattr(preview, "_vas_preview_path", "")).casefold()
+        if not preview_path or preview_path not in wanted:
+            continue
+        try:
+            player = getattr(preview, "player", None)
+            if player is not None:
+                player.stop()
+                player.setSource(QUrl())
+                player.setVideoOutput(None)
+                player.setAudioOutput(None)
+            preview.close()
+        except Exception:
+            try:
+                preview.close()
+            except Exception:
+                pass
+    try:
+        QApplication.processEvents()
+    except Exception:
+        pass
+
+
 def _delete_selected(self):
     paths = []
     for row in range(self.table.rowCount()):
@@ -359,6 +377,7 @@ def _delete_selected(self):
     answer = df.QMessageBox.warning(self, "Bevestig verwijderen", f"De volgende {len(paths)} video('s) worden naar de Windows Prullenbak verplaatst:\n\n{names}\n\nDoorgaan?", df.QMessageBox.StandardButton.Yes | df.QMessageBox.StandardButton.No, df.QMessageBox.StandardButton.No)
     if answer != df.QMessageBox.StandardButton.Yes:
         return
+    _release_selected_previews(self, paths)
     errors = []
     moved = 0
     for path in paths:
@@ -373,7 +392,68 @@ def _delete_selected(self):
         df.QMessageBox.information(self, "Prullenbak", f"{moved} bestand(en) naar de Windows Prullenbak verplaatst.")
 
 
+def _install_preview_cleanup():
+    if getattr(df.VideoPreviewDialog, "_vas_cleanup_installed", False):
+        return
+    original_init = df.VideoPreviewDialog.__init__
+    original_close = df.VideoPreviewDialog.closeEvent
+
+    def preview_init(self, path, parent=None):
+        self._vas_preview_path = str(Path(path).resolve())
+        original_init(self, path, parent)
+
+    def preview_close(self, event):
+        try:
+            self.player.stop()
+            self.player.setSource(QUrl())
+            self.player.setVideoOutput(None)
+            self.player.setAudioOutput(None)
+        except Exception:
+            pass
+        original_close(self, event)
+
+    df.VideoPreviewDialog.__init__ = preview_init
+    df.VideoPreviewDialog.closeEvent = preview_close
+    df.VideoPreviewDialog._vas_cleanup_installed = True
+
+
+def _install_completion_popup():
+    if getattr(df.DuplicateFinderWindow, "_vas_completion_installed", False):
+        return
+    original = df.DuplicateFinderWindow.scan_finished
+
+    def scan_finished(self, rows):
+        original(self, rows)
+        candidates = list(rows)
+        groups = len({getattr(row, "group", None) for row in candidates}) if candidates else 0
+        recommended = [row for row in candidates if getattr(row, "recommended_delete", False)]
+        reclaim = sum(getattr(row.info, "size", 0) for row in recommended) / (1024 ** 3)
+        if os.name == "nt":
+            try:
+                import winsound
+                winsound.Beep(880, 180)
+                winsound.Beep(1046, 180)
+            except Exception:
+                pass
+        if candidates:
+            text = ("De analyse is volledig klaar.\n\n"
+                    f"Duplicaatgroepen: {groups}\n"
+                    f"Dubbele bestanden: {len(candidates)}\n"
+                    f"Automatisch geselecteerd: {len(recommended)}\n"
+                    f"Mogelijke ruimtewinst: {reclaim:.2f} GB\n\n"
+                    "Exacte duplicaten en vermoedelijke duplicaten staan in de lijst.\n"
+                    "De beste versie is niet geselecteerd.")
+        else:
+            text = "De analyse is volledig klaar.\n\nGeen dubbele video's gevonden."
+        df.QMessageBox.information(self, "Analyse voltooid", text)
+
+    df.DuplicateFinderWindow.scan_finished = scan_finished
+    df.DuplicateFinderWindow._vas_completion_installed = True
+
+
 def install_fixes():
     df.analyse_videos = analyse_videos
     df.send_to_recycle_bin = send_to_recycle_bin
     df.DuplicateFinderWindow.delete_selected = _delete_selected
+    _install_preview_cleanup()
+    _install_completion_popup()
