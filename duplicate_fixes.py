@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import duplicate_finder as df
+
+CACHE_NAME = ".videoaudioscanner_duplicates.json"
 
 
 def _visual_hashes(ffmpeg: str, path: str, duration: float) -> list[int]:
@@ -55,14 +59,103 @@ def _quality_key(info: df.VideoInfo):
     return (info.width * info.height, info.bitrate, info.size, info.duration)
 
 
+def _video_inventory(folder: str) -> list[dict]:
+    root = Path(folder)
+    items = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in df.VIDEO_EXTENSIONS:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        items.append({"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    items.sort(key=lambda item: item["path"].casefold())
+    return items
+
+
+def _cache_path(folder: str) -> Path:
+    return Path(folder) / CACHE_NAME
+
+
+def _inventory_key(inventory: list[dict]) -> str:
+    digest = hashlib.sha256()
+    for item in inventory:
+        digest.update(item["path"].encode("utf-8", "surrogatepass"))
+        digest.update(b"\0")
+        digest.update(str(item["size"]).encode())
+        digest.update(b"\0")
+        digest.update(str(item["mtime_ns"]).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _load_cache(folder: str, inventory: list[dict]):
+    try:
+        data = json.loads(_cache_path(folder).read_text(encoding="utf-8"))
+        if data.get("version") != 1 or data.get("inventory_key") != _inventory_key(inventory):
+            return None
+        results = []
+        for entry in data.get("results", []):
+            info = df.VideoInfo(**entry["info"])
+            results.append(df.DuplicateCandidate(int(entry["group"]), int(entry["similarity"]), info, bool(entry["recommended_delete"]), entry["reason"]))
+        if any(not Path(result.info.path).is_file() for result in results):
+            return None
+        return results
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _save_cache(folder: str, inventory: list[dict], results: list[df.DuplicateCandidate]):
+    payload = {
+        "version": 1,
+        "inventory_key": _inventory_key(inventory),
+        "video_count": len(inventory),
+        "results": [
+            {
+                "group": result.group,
+                "similarity": result.similarity,
+                "recommended_delete": result.recommended_delete,
+                "reason": result.reason,
+                "info": {
+                    "path": result.info.path,
+                    "name": result.info.name,
+                    "size": result.info.size,
+                    "duration": result.info.duration,
+                    "duration_text": result.info.duration_text,
+                    "resolution": result.info.resolution,
+                    "width": result.info.width,
+                    "height": result.info.height,
+                    "bitrate": result.info.bitrate,
+                    "bitrate_text": result.info.bitrate_text,
+                    "video_codec": result.info.video_codec,
+                    "audio_codec": result.info.audio_codec,
+                    "fps": result.info.fps,
+                    "container": result.info.container,
+                    "video_hash": result.info.video_hash,
+                },
+            }
+            for result in results
+        ],
+    }
+    target = _cache_path(folder)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _report(progress, current, total):
-    # FinderWorker exposes Signal(int, int), so this callback must always emit
-    # exactly two arguments. The GUI derives its own status text from them.
     if progress:
         progress(int(current), max(int(total), 1))
 
 
-def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
+def _analyse_videos_uncached(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
     if not ffprobe or not ffmpeg:
         raise RuntimeError("FFprobe en FFmpeg zijn vereist.")
     scanner = df.MediaScanner(ffprobe)
@@ -72,8 +165,7 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
     for index, path in enumerate(paths, 1):
         result = scanner._inspect(path)
         width, height = df.parse_resolution(result.resolution)
-        info = df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container)
-        infos.append(info)
+        infos.append(df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container))
         _report(progress, index, len(paths))
 
     by_size = {}
@@ -135,9 +227,7 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         aspect_bucket = round((info.width / info.height), 2) if info.width and info.height else 0
         key = (duration_bucket, aspect_bucket, info.width, info.height)
         buckets.setdefault(key, []).append(info)
-
-    bucket_list = list(buckets.values())
-    for candidates in bucket_list:
+    for candidates in buckets.values():
         if len(candidates) <= 60:
             for index, first in enumerate(candidates):
                 for second in candidates[index + 1:]:
@@ -166,6 +256,17 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
                 similarity = max(scores) if scores else 0
                 reason = "Beste kwaliteit behouden" if info is best else "Vermoedelijk lagere kwaliteit"
             results.append(df.DuplicateCandidate(group_number, similarity, info, info is not best, reason))
+    return results
+
+
+def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
+    inventory = _video_inventory(folder)
+    cached = _load_cache(folder, inventory)
+    if cached is not None:
+        _report(progress, len(inventory), len(inventory))
+        return cached
+    results = _analyse_videos_uncached(folder, ffprobe, ffmpeg, progress)
+    _save_cache(folder, inventory, results)
     return results
 
 
@@ -199,7 +300,6 @@ def _delete_selected(self):
     if not paths:
         df.QMessageBox.information(self, "Prullenbak", "Er zijn geen bestanden geselecteerd.")
         return
-
     for dialog in list(getattr(self, "preview_windows", [])):
         try:
             dialog.close()
@@ -208,14 +308,12 @@ def _delete_selected(self):
             pass
     if hasattr(self, "preview_windows"):
         self.preview_windows.clear()
-
     names = "\n".join(Path(p).name for p in paths[:12])
     if len(paths) > 12:
         names += f"\n… en nog {len(paths) - 12} bestand(en)."
     answer = df.QMessageBox.warning(self, "Bevestig verwijderen", f"De volgende {len(paths)} video('s) worden naar de Windows Prullenbak verplaatst:\n\n{names}\n\nDoorgaan?", df.QMessageBox.StandardButton.Yes | df.QMessageBox.StandardButton.No, df.QMessageBox.StandardButton.No)
     if answer != df.QMessageBox.StandardButton.Yes:
         return
-
     errors = []
     moved = 0
     for path in paths:
