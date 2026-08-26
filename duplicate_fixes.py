@@ -11,7 +11,9 @@ from pathlib import Path
 import duplicate_finder as df
 
 CACHE_NAME = ".videoaudioscanner_duplicates.json"
-CACHE_VERSION = 5
+CACHE_VERSION = 6
+MAX_VISUAL_FILES = 800
+MAX_VISUAL_PAIRS = 3000
 
 
 def _visual_hashes(ffmpeg: str, path: str, duration: float) -> list[int]:
@@ -160,57 +162,7 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             records.pop(item["path"], None)
         _report(progress, index, len(inventory))
 
-    # Candidate generation is deliberately bounded. The old implementation could
-    # build O(n²) pairs for a large library and appear to hang after the scan.
-    candidate_pairs = []
-    seen = set()
-    candidate_paths = set()
-
-    def add_pair(a, b):
-        key = tuple(sorted((a.path, b.path), key=str.casefold))
-        if a.path == b.path or key in seen:
-            return
-        seen.add(key)
-        candidate_pairs.append((a, b))
-        candidate_paths.add(a.path)
-        candidate_paths.add(b.path)
-
-    # Same/near-same names: compare all pairs, but only inside tight metadata buckets.
-    name_groups = {}
-    for info in infos:
-        duration_bucket = int(round(info.duration / 5.0)) if info.duration > 0 else 0
-        aspect = round(info.width / info.height, 2) if info.width and info.height else 0
-        name_groups.setdefault((_name_key(info.name), duration_bucket, aspect), []).append(info)
-    for candidates in name_groups.values():
-        if len(candidates) > 60:
-            continue
-        for i, first in enumerate(candidates):
-            for second in candidates[i + 1:]:
-                add_pair(first, second)
-
-    # Different filenames: use the same duration/aspect/resolution bucket, but
-    # compare only the nearest files by size. This preserves useful visual matching
-    # while guaranteeing bounded work for very large folders.
-    buckets = {}
-    for info in infos:
-        if info.duration <= 0 or not info.width or not info.height:
-            continue
-        key = (int(round(info.duration / 5.0)), round(info.width / info.height, 2), info.width, info.height)
-        buckets.setdefault(key, []).append(info)
-    for candidates in buckets.values():
-        if len(candidates) > 250:
-            continue
-        ordered = sorted(candidates, key=lambda x: x.size)
-        for i, first in enumerate(ordered):
-            neighbours = ordered[max(0, i - 6):min(len(ordered), i + 7)]
-            for second in neighbours:
-                if second is first or _name_key(first.name) == _name_key(second.name):
-                    continue
-                low, high = sorted((first.size, second.size))
-                if low and high / low <= 1.35:
-                    add_pair(first, second)
-
-    # Exact duplicates only need hashing when a file size occurs more than once.
+    # Exact duplicates are cheap to identify because only equal-size files are hashed.
     by_size = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
@@ -233,11 +185,86 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
                 exact_groups.append(same)
                 used.update(x.path for x in same)
 
-    # Fingerprint only bounded visual candidates and reuse cached fingerprints.
+    remaining = [i for i in infos if i.path not in used]
+    candidate_pairs = []
+    seen = set()
+
+    def add_pair(a, b):
+        if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+            return False
+        key = tuple(sorted((a.path, b.path), key=str.casefold))
+        if a.path == b.path or key in seen:
+            return False
+        seen.add(key)
+        candidate_pairs.append((a, b))
+        return True
+
+    # Strong candidates first: same normalized filename, close duration and aspect ratio.
+    name_groups = {}
+    for info in remaining:
+        duration_bucket = int(round(info.duration / 5.0)) if info.duration > 0 else 0
+        aspect = round(info.width / info.height, 2) if info.width and info.height else 0
+        name_groups.setdefault((_name_key(info.name), duration_bucket, aspect), []).append(info)
+    for candidates in name_groups.values():
+        if len(candidates) > 60:
+            continue
+        for i, first in enumerate(candidates):
+            for second in candidates[i + 1:]:
+                if not add_pair(first, second):
+                    break
+            if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+                break
+        if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+            break
+
+    # Different names: nearest file sizes inside a tight duration/aspect/resolution bucket.
+    if len(candidate_pairs) < MAX_VISUAL_PAIRS:
+        buckets = {}
+        for info in remaining:
+            if info.duration <= 0 or not info.width or not info.height:
+                continue
+            key = (int(round(info.duration / 5.0)), round(info.width / info.height, 2), info.width, info.height)
+            buckets.setdefault(key, []).append(info)
+        for candidates in buckets.values():
+            if len(candidates) > 250:
+                continue
+            ordered = sorted(candidates, key=lambda x: x.size)
+            for i, first in enumerate(ordered):
+                neighbours = ordered[max(0, i - 4):min(len(ordered), i + 5)]
+                for second in neighbours:
+                    if second is first or _name_key(first.name) == _name_key(second.name):
+                        continue
+                    low, high = sorted((first.size, second.size))
+                    if low and high / low <= 1.35:
+                        add_pair(first, second)
+                        if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+                            break
+                if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+                    break
+            if len(candidate_pairs) >= MAX_VISUAL_PAIRS:
+                break
+
+    # Only fingerprint files that actually participate in a candidate pair.
+    candidate_paths = set()
+    for first, second in candidate_pairs:
+        candidate_paths.add(first.path)
+        candidate_paths.add(second.path)
+
+    # Safety limit: if an unusually large library produces too many candidates,
+    # prioritize the files appearing in the strongest same-name candidates first.
+    if len(candidate_paths) > MAX_VISUAL_FILES:
+        ranked = []
+        for path in candidate_paths:
+            info = next((x for x in remaining if x.path == path), None)
+            ranked.append((0 if info and _name_key(info.name) else 1, path))
+        keep = {path for _, path in sorted(ranked)[:MAX_VISUAL_FILES]}
+        candidate_pairs = [(a, b) for a, b in candidate_pairs if a.path in keep and b.path in keep]
+        candidate_paths = keep
+
     fingerprints = {}
-    info_by_path = {x.path: x for x in infos}
-    for path in candidate_paths:
-        info = info_by_path.get(path)
+    total_fp = len(candidate_paths)
+    for index, path in enumerate(sorted(candidate_paths, key=str.casefold), 1):
+        info = next((x for x in remaining if x.path == path), None)
         if info is None:
             continue
         record = records.get(path, {})
@@ -249,9 +276,13 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             if fp:
                 fingerprints[path] = fp
                 record["visual_hashes"] = fp
+        # Re-use the same two-int progress signal, but make the final phase visible
+        # by counting fingerprint work from 0..total_fp.
+        _report(progress, index, max(total_fp, 1))
 
     groups = list(exact_groups)
-    for first, second in candidate_pairs:
+    info_by_path = {x.path: x for x in remaining}
+    for index, (first, second) in enumerate(candidate_pairs, 1):
         if first.path in used or second.path in used:
             continue
         ratio = abs(first.duration - second.duration) / max(first.duration, second.duration, 1)
