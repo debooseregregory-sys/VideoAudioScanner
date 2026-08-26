@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import hashlib
 import os
 import shutil
@@ -14,28 +15,14 @@ def _visual_hashes(ffmpeg: str, path: str, duration: float) -> list[int]:
     points = [duration * fraction for fraction in (0.12, 0.36, 0.60, 0.84)] if duration > 0 else [0.0]
     hashes: list[int] = []
     for point in points:
-        command = [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-ss", f"{point:.3f}", "-i", path,
-            "-frames:v", "1", "-vf", "scale=33:18,format=gray",
-            "-f", "rawvideo", "pipe:1",
-        ]
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{point:.3f}", "-i", path, "-frames:v", "1", "-vf", "scale=33:18,format=gray", "-f", "rawvideo", "pipe:1"]
         try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                timeout=45,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            completed = subprocess.run(command, capture_output=True, timeout=45, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         except (OSError, subprocess.SubprocessError):
             return []
-        if completed.returncode != 0 or not completed.stdout:
+        if completed.returncode != 0 or len(completed.stdout) < 33 * 18:
             return []
-        frame = completed.stdout
-        expected = 33 * 18
-        if len(frame) < expected:
-            return []
-        frame = frame[:expected]
+        frame = completed.stdout[:33 * 18]
         value = 0
         for y in range(18):
             row = y * 33
@@ -48,11 +35,7 @@ def _visual_hashes(ffmpeg: str, path: str, duration: float) -> list[int]:
 def _hamming_similarity(first: list[int], second: list[int]) -> int:
     if not first or not second or len(first) != len(second):
         return 0
-    scores = []
-    for a, b in zip(first, second):
-        distance = (a ^ b).bit_count()
-        scores.append(100 - (distance * 100 // 576))
-    return int(round(sum(scores) / len(scores)))
+    return int(round(sum(100 - ((a ^ b).bit_count() * 100 // 576) for a, b in zip(first, second)) / len(first)))
 
 
 def _name_key(name: str) -> str:
@@ -70,51 +53,33 @@ def _name_key(name: str) -> str:
 
 
 def _quality_key(info: df.VideoInfo):
-    return (
-        info.width * info.height,
-        info.bitrate,
-        info.size,
-        info.duration,
-    )
+    return (info.width * info.height, info.bitrate, info.size, info.duration)
 
 
 def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
-    if not ffprobe:
-        raise RuntimeError("FFprobe is niet gevonden.")
-    if not ffmpeg:
-        raise RuntimeError("FFmpeg is niet gevonden.")
-
+    if not ffprobe or not ffmpeg:
+        raise RuntimeError("FFprobe en FFmpeg zijn vereist.")
     scanner = df.MediaScanner(ffprobe)
     root = Path(folder)
-    paths = sorted(
-        (p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in df.VIDEO_EXTENSIONS),
-        key=lambda p: str(p).casefold(),
-    )
-    infos: list[df.VideoInfo] = []
-    total = len(paths)
+    paths = sorted((p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in df.VIDEO_EXTENSIONS), key=lambda p: str(p).casefold())
+    infos = []
     for index, path in enumerate(paths, 1):
         result = scanner._inspect(path)
         width, height = df.parse_resolution(result.resolution)
-        info = df.VideoInfo(
-            result.path, result.name, result.size_bytes, result.duration_seconds,
-            result.duration_text, result.resolution, width, height,
-            df.parse_bitrate(result.bitrate), result.bitrate,
-            result.video_codec, result.audio_codec, result.fps, result.container,
-        )
+        info = df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container)
         infos.append(info)
         if progress:
-            progress(index, total)
+            progress(index, len(paths))
 
-    # SHA-256 is the only automatic match that is called "exact".
-    by_size: dict[int, list[df.VideoInfo]] = {}
+    by_size = {}
     for info in infos:
         by_size.setdefault(info.size, []).append(info)
-    groups: list[list[df.VideoInfo]] = []
-    used: set[str] = set()
+    groups = []
+    used = set()
     for candidates in by_size.values():
         if len(candidates) < 2:
             continue
-        hashes: dict[str, list[df.VideoInfo]] = {}
+        hashes = {}
         for info in candidates:
             info.video_hash = df.exact_hash(info.path)
             hashes.setdefault(info.video_hash, []).append(info)
@@ -124,123 +89,84 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
                 used.update(i.path for i in same)
 
     remaining = [i for i in infos if i.path not in used]
-    fingerprints: dict[str, list[int]] = {}
-    for index, info in enumerate(remaining, 1):
-        fingerprints[info.path] = _visual_hashes(ffmpeg, info.path, info.duration)
-        if progress:
-            progress(index, len(remaining))
-
-    # Conservative candidate generation: similar duration is required unless the
-    # filenames are clearly copies of the same name. This prevents unrelated dark
-    # or low-detail videos from being grouped merely because their pixels are similar.
-    name_groups: dict[str, list[df.VideoInfo]] = {}
+    fingerprints = {info.path: _visual_hashes(ffmpeg, info.path, info.duration) for info in remaining}
+    name_groups = {}
     for info in remaining:
         name_groups.setdefault(_name_key(info.name), []).append(info)
+    pairs = []
+    seen_pairs = set()
 
-    pairs: list[tuple[df.VideoInfo, df.VideoInfo, int]] = []
-    seen_pairs: set[tuple[str, str]] = set()
-
-    def consider(first: df.VideoInfo, second: df.VideoInfo):
-        if first.path == second.path:
-            return
+    def consider(first, second):
         key = tuple(sorted((first.path, second.path), key=str.casefold))
-        if key in seen_pairs:
+        if first.path == second.path or key in seen_pairs or first.duration <= 0 or second.duration <= 0:
             return
         seen_pairs.add(key)
-        if first.duration <= 0 or second.duration <= 0:
-            return
-        duration_ratio = abs(first.duration - second.duration) / max(first.duration, second.duration)
+        ratio = abs(first.duration - second.duration) / max(first.duration, second.duration)
         same_name = _name_key(first.name) == _name_key(second.name)
-        # A filename match may tolerate a little editing; unnamed matches must be very strong.
-        if duration_ratio > (0.025 if same_name else 0.012):
+        if ratio > (0.025 if same_name else 0.012):
             return
         similarity = _hamming_similarity(fingerprints.get(first.path, []), fingerprints.get(second.path, []))
-        threshold = 91 if same_name else 96
-        if similarity >= threshold:
-            pairs.append((first, second, similarity))
+        if similarity >= (91 if same_name else 96):
+            pairs.append((first, second))
 
     for candidates in name_groups.values():
-        if len(candidates) > 1:
-            for index, first in enumerate(candidates):
-                for second in candidates[index + 1:]:
-                    consider(first, second)
+        for index, first in enumerate(candidates):
+            for second in candidates[index + 1:]:
+                consider(first, second)
 
-    # For different filenames, only compare videos with a close duration bucket.
-    duration_buckets: dict[int, list[df.VideoInfo]] = {}
+    buckets = {}
     for info in remaining:
-        duration_buckets.setdefault(round(info.duration / 10), []).append(info)
-    for bucket, candidates in duration_buckets.items():
-        nearby = candidates + duration_buckets.get(bucket - 1, []) + duration_buckets.get(bucket + 1, [])
-        unique = {i.path: i for i in nearby}
-        values = list(unique.values())
+        buckets.setdefault(round(info.duration / 10), []).append(info)
+    for bucket, candidates in buckets.items():
+        values = {i.path: i for i in candidates + buckets.get(bucket - 1, []) + buckets.get(bucket + 1, [])}.values()
+        values = list(values)
         for index, first in enumerate(values):
             for second in values[index + 1:]:
                 if _name_key(first.name) != _name_key(second.name):
                     consider(first, second)
 
-    # Merge connected candidate pairs into groups.
-    for first, second, _similarity in pairs:
+    for first, second in pairs:
         target = next((group for group in groups if first in group or second in group), None)
         if target is None:
             groups.append([first, second])
         else:
-            if first not in target:
-                target.append(first)
-            if second not in target:
-                target.append(second)
+            if first not in target: target.append(first)
+            if second not in target: target.append(second)
 
-    results: list[df.DuplicateCandidate] = []
+    results = []
     for group_number, group in enumerate(groups, 1):
         best = max(group, key=_quality_key)
         for info in group:
             if info.video_hash:
                 similarity = 100
+                reason = "Exact identiek — " + ("beste versie behouden" if info is best else "kopie")
             else:
                 scores = [_hamming_similarity(fingerprints.get(info.path, []), fingerprints.get(other.path, [])) for other in group if other is not info]
                 similarity = max(scores) if scores else 0
-            delete = info is not best
-            if info.video_hash:
-                reason = "Exact identiek — beste versie behouden" if not delete else "Exact identiek — kopie"
-            else:
-                reason = "Beste kwaliteit behouden" if not delete else "Vermoedelijk lagere kwaliteit"
-            results.append(df.DuplicateCandidate(group_number, similarity, info, delete, reason))
+                reason = "Beste kwaliteit behouden" if info is best else "Vermoedelijk lagere kwaliteit"
+            results.append(df.DuplicateCandidate(group_number, similarity, info, info is not best, reason))
     return results
 
 
 def send_to_recycle_bin(path: str):
     if os.name != "nt":
         raise RuntimeError("De Windows Prullenbak is alleen beschikbaar op Windows.")
-    if not Path(path).is_file():
-        raise FileNotFoundError(path)
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
-        _fields_ = [
-            ("hwnd", ctypes.wintypes.HWND),
-            ("wFunc", ctypes.wintypes.UINT),
-            ("pFrom", ctypes.wintypes.LPCWSTR),
-            ("pTo", ctypes.wintypes.LPCWSTR),
-            ("fFlags", ctypes.wintypes.UINT),
-            ("fAnyOperationsAborted", ctypes.wintypes.BOOL),
-            ("hNameMappings", ctypes.wintypes.LPVOID),
-            ("lpszProgressTitle", ctypes.wintypes.LPCWSTR),
-        ]
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.UINT), ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
 
-    source = str(Path(path).resolve()) + "\0\0"
     operation = SHFILEOPSTRUCTW()
     operation.wFunc = 0x0003
-    operation.pFrom = source
-    operation.fFlags = 0x0004 | 0x0010 | 0x0040 | 0x0400
+    operation.pFrom = str(resolved) + "\0\0"
+    operation.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400
     result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
     if result != 0:
         raise OSError(f"Windows SHFileOperation foutcode {result}")
     if operation.fAnyOperationsAborted:
         raise OSError("Windows heeft het verplaatsen afgebroken")
-
-
-def install_fixes():
-    df.analyse_videos = analyse_videos
-    df.send_to_recycle_bin = send_to_recycle_bin
-    df.DuplicateFinderWindow.delete_selected = _delete_selected
 
 
 def _delete_selected(self):
@@ -250,28 +176,31 @@ def _delete_selected(self):
         if item and item.checkState() == df.Qt.CheckState.Checked:
             path = item.data(df.Qt.ItemDataRole.UserRole)
             if path and Path(path).is_file():
-                paths.append(path)
+                paths.append(str(path))
     if not paths:
         df.QMessageBox.information(self, "Prullenbak", "Er zijn geen bestanden geselecteerd.")
         return
-    names = "\n".join(Path(path).name for path in paths[:12])
+    names = "\n".join(Path(p).name for p in paths[:12])
     if len(paths) > 12:
         names += f"\n… en nog {len(paths) - 12} bestand(en)."
-    answer = df.QMessageBox.warning(
-        self, "Bevestig verwijderen",
-        f"De volgende {len(paths)} video('s) worden naar de Windows Prullenbak verplaatst:\n\n{names}\n\nDoorgaan?",
-        df.QMessageBox.StandardButton.Yes | df.QMessageBox.StandardButton.No,
-        df.QMessageBox.StandardButton.No,
-    )
+    answer = df.QMessageBox.warning(self, "Bevestig verwijderen", f"De volgende {len(paths)} video('s) worden naar de Windows Prullenbak verplaatst:\n\n{names}\n\nDoorgaan?", df.QMessageBox.StandardButton.Yes | df.QMessageBox.StandardButton.No, df.QMessageBox.StandardButton.No)
     if answer != df.QMessageBox.StandardButton.Yes:
         return
     errors = []
+    moved = 0
     for path in paths:
         try:
             send_to_recycle_bin(path)
+            moved += 1
         except Exception as exc:
             errors.append(f"{Path(path).name}: {exc}")
     if errors:
-        df.QMessageBox.warning(self, "Prullenbak", "Sommige bestanden konden niet worden verplaatst:\n\n" + "\n".join(errors[:10]))
+        df.QMessageBox.warning(self, "Prullenbak", f"{moved} bestand(en) verplaatst.\n\nNiet gelukt:\n" + "\n".join(errors[:12]))
     else:
-        df.QMessageBox.information(self, "Prullenbak", f"{len(paths)} bestand(en) naar de Windows Prullenbak verplaatst.")
+        df.QMessageBox.information(self, "Prullenbak", f"{moved} bestand(en) naar de Windows Prullenbak verplaatst.")
+
+
+def install_fixes():
+    df.analyse_videos = analyse_videos
+    df.send_to_recycle_bin = send_to_recycle_bin
+    df.DuplicateFinderWindow.delete_selected = _delete_selected
