@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import duplicate_finder as df
@@ -155,6 +156,21 @@ def _report(progress, current, total):
         progress(int(current), max(int(total), 1))
 
 
+def _inspect_with_retry(scanner, path: Path):
+    last = None
+    for attempt in range(3):
+        try:
+            result = scanner._inspect(path)
+            last = result
+            if result.status == "OK" or not result.status.startswith("Fout"):
+                return result
+        except Exception as exc:
+            last = None
+        if attempt < 2:
+            time.sleep(0.75)
+    return last
+
+
 def _analyse_videos_uncached(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
     if not ffprobe or not ffmpeg:
         raise RuntimeError("FFprobe en FFmpeg zijn vereist.")
@@ -163,9 +179,10 @@ def _analyse_videos_uncached(folder: str, ffprobe: str | None, ffmpeg: str | Non
     paths = sorted((p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in df.VIDEO_EXTENSIONS), key=lambda p: str(p).casefold())
     infos = []
     for index, path in enumerate(paths, 1):
-        result = scanner._inspect(path)
-        width, height = df.parse_resolution(result.resolution)
-        infos.append(df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container))
+        result = _inspect_with_retry(scanner, path)
+        if result is not None:
+            width, height = df.parse_resolution(result.resolution)
+            infos.append(df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container))
         _report(progress, index, len(paths))
 
     by_size = {}
@@ -178,10 +195,13 @@ def _analyse_videos_uncached(folder: str, ffprobe: str | None, ffmpeg: str | Non
             continue
         hashes = {}
         for info in candidates:
-            info.video_hash = df.exact_hash(info.path)
+            try:
+                info.video_hash = df.exact_hash(info.path)
+            except (OSError, PermissionError):
+                info.video_hash = ""
             hashes.setdefault(info.video_hash, []).append(info)
         for same in hashes.values():
-            if len(same) > 1:
+            if same[0].video_hash and len(same) > 1:
                 groups.append(same)
                 used.update(i.path for i in same)
 
@@ -256,7 +276,7 @@ def _analyse_videos_uncached(folder: str, ffprobe: str | None, ffmpeg: str | Non
                 similarity = max(scores) if scores else 0
                 reason = "Beste kwaliteit behouden" if info is best else "Vermoedelijk lagere kwaliteit"
             results.append(df.DuplicateCandidate(group_number, similarity, info, info is not best, reason))
-    return results
+    return results, len(infos), len(paths)
 
 
 def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
@@ -265,8 +285,11 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
     if cached is not None:
         _report(progress, len(inventory), len(inventory))
         return cached
-    results = _analyse_videos_uncached(folder, ffprobe, ffmpeg, progress)
-    _save_cache(folder, inventory, results)
+    results, analysed_count, discovered_count = _analyse_videos_uncached(folder, ffprobe, ffmpeg, progress)
+    # Never cache a scan that could not inspect every video. A temporarily open
+    # file will therefore be retried on the next scan instead of being forgotten.
+    if analysed_count == discovered_count:
+        _save_cache(folder, inventory, results)
     return results
 
 
