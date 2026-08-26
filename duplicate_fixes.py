@@ -55,9 +55,11 @@ def _quality_key(info: df.VideoInfo):
     return (info.width * info.height, info.bitrate, info.size, info.duration)
 
 
-def _report(progress, current, total, text):
+def _report(progress, current, total):
+    # FinderWorker exposes Signal(int, int), so this callback must always emit
+    # exactly two arguments. The GUI derives its own status text from them.
     if progress:
-        progress(current, max(total, 1), text)
+        progress(int(current), max(int(total), 1))
 
 
 def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progress=None):
@@ -72,7 +74,7 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         width, height = df.parse_resolution(result.resolution)
         info = df.VideoInfo(result.path, result.name, result.size_bytes, result.duration_seconds, result.duration_text, result.resolution, width, height, df.parse_bitrate(result.bitrate), result.bitrate, result.video_codec, result.audio_codec, result.fps, result.container)
         infos.append(info)
-        _report(progress, index, len(paths), f"Video {index} van {len(paths)} analyseren…")
+        _report(progress, index, len(paths))
 
     by_size = {}
     for info in infos:
@@ -99,7 +101,7 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
             fingerprints[info.path] = _visual_hashes(ffmpeg, info.path, info.duration)
         except (OSError, subprocess.SubprocessError):
             fingerprints[info.path] = []
-        _report(progress, index, total_fp, f"Videobeelden vergelijken: {index} van {total_fp}…")
+        _report(progress, index, total_fp)
 
     pairs = []
     seen_pairs = set()
@@ -135,13 +137,12 @@ def analyse_videos(folder: str, ffprobe: str | None, ffmpeg: str | None, progres
         buckets.setdefault(key, []).append(info)
 
     bucket_list = list(buckets.values())
-    for bucket_index, candidates in enumerate(bucket_list, 1):
+    for candidates in bucket_list:
         if len(candidates) <= 60:
             for index, first in enumerate(candidates):
                 for second in candidates[index + 1:]:
                     if _name_key(first.name) != _name_key(second.name):
                         consider(first, second)
-        _report(progress, bucket_index, len(bucket_list), f"Duplicaten vergelijken: groep {bucket_index} van {len(bucket_list)}…")
 
     for first, second in pairs:
         target = next((group for group in groups if first in group or second in group), None)
@@ -199,8 +200,6 @@ def _delete_selected(self):
         df.QMessageBox.information(self, "Prullenbak", "Er zijn geen bestanden geselecteerd.")
         return
 
-    # Close every preview first. QMediaPlayer can keep a Windows file handle
-    # open, which causes SHFileOperation to return error 32 (sharing violation).
     for dialog in list(getattr(self, "preview_windows", [])):
         try:
             dialog.close()
