@@ -31,6 +31,11 @@ try:
         QMessageBox.information(self, "Analyse voltooid", text)
 
     duplicate_finder.DuplicateFinderWindow.scan_finished = _scan_finished_with_notification
+
+    # Release QMediaPlayer handles before selected duplicate files are sent to
+    # the Windows Recycle Bin. This prevents Windows error 32 after previewing.
+    from duplicate_delete_lock_fix import apply as apply_delete_lock_fix
+    apply_delete_lock_fix()
 except Exception:
     # Never prevent the main scanner from starting because an optional patch failed.
     pass
