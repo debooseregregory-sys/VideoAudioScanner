@@ -8,7 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QSize
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -288,6 +289,63 @@ def open_video(path: str):
         QMessageBox.warning(None, "Video openen", f"Kan de video niet openen:\n\n{path}\n\n{exc}")
 
 
+def create_video_thumbnail(ffmpeg: str | None, path: str, duration: float) -> QPixmap:
+    """Maak een echte videothumbnail met FFmpeg."""
+    if not ffmpeg or not os.path.isfile(path):
+        return QPixmap()
+
+    try:
+        if duration > 2:
+            timestamp = max(0.5, duration * 0.50)
+        else:
+            timestamp = 0.0
+
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", f"{timestamp:.3f}",
+            "-i", path,
+            "-frames:v", "1",
+            "-vf",
+            "scale=320:180:force_original_aspect_ratio=decrease,"
+            "pad=320:180:(ow-iw)/2:(oh-ih)/2",
+            "-f", "image2",
+            "-vcodec", "mjpeg",
+            "-q:v", "4",
+            "pipe:1",
+        ]
+
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if os.name == "nt"
+                else 0
+            ),
+        )
+
+        if completed.returncode != 0 or not completed.stdout:
+            return QPixmap()
+
+        image = QImage.fromData(completed.stdout, "JPG")
+
+        if image.isNull():
+            return QPixmap()
+
+        return QPixmap.fromImage(image).scaled(
+            QSize(320, 180),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    except (OSError, subprocess.SubprocessError):
+        return QPixmap()
+
+
 class DuplicateGroupDialog(QDialog):
     """Modeless professional overview of the duplicate groups from the last scan."""
 
@@ -351,6 +409,13 @@ class DuplicateGroupDialog(QDialog):
             QLabel#keep { color: #8fd19e; font-weight: 800; }
             QLabel#delete { color: #e58b91; font-weight: 800; }
             QLabel#groupDetails { color: #d5dae1; padding: 5px; }
+            QLabel#videoThumbnail {
+                background: #090a0c;
+                border: 1px solid #3c424c;
+                border-radius: 6px;
+                color: #6f7682;
+                font-weight: 700;
+            }
             QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 6px; padding: 8px 13px; }
             QPushButton:hover { background: #353b45; }
         """)
@@ -365,6 +430,7 @@ class DuplicateGroupDialog(QDialog):
     def refresh(self):
         self._clear_cards()
         rows = list(self.finder.rows or [])
+        ffmpeg = find_ffmpeg()
         groups: dict[int, list[DuplicateCandidate]] = {}
         for row in rows:
             groups.setdefault(row.group, []).append(row)
@@ -409,25 +475,64 @@ class DuplicateGroupDialog(QDialog):
             for member in members:
                 info = member.info
                 row_layout = QHBoxLayout()
-                status = QLabel("★ BEWAREN" if not member.recommended_delete else "● VERWIJDEREN")
-                status.setObjectName("keep" if not member.recommended_delete else "delete")
+                row_layout.setSpacing(12)
+
+                thumbnail = QLabel()
+                thumbnail.setFixedSize(320, 180)
+                thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                thumbnail.setObjectName("videoThumbnail")
+                thumbnail.setToolTip("Videoframe uit deze video")
+
+                pixmap = create_video_thumbnail(
+                    ffmpeg,
+                    info.path,
+                    info.duration,
+                )
+
+                if not pixmap.isNull():
+                    thumbnail.setPixmap(pixmap)
+                else:
+                    thumbnail.setText("GEEN\nVOORBEELD")
+
+                status = QLabel(
+                    "? BEWAREN"
+                    if not member.recommended_delete
+                    else "? VERWIJDEREN"
+                )
+                status.setObjectName(
+                    "keep"
+                    if not member.recommended_delete
+                    else "delete"
+                )
                 status.setMinimumWidth(135)
 
                 details = QLabel(
                     f"<b>{info.name}</b><br>"
-                    f"{info.resolution}  •  {info.bitrate_text}  •  {info.duration_text}  •  "
-                    f"{info.video_codec}/{info.audio_codec}  •  {info.fps} FPS  •  {info.size / (1024 ** 3):.2f} GB<br>"
-                    f"Match: {member.similarity}%  —  {member.reason}<br>"
+                    f"{info.resolution}  ?  {info.bitrate_text}  ?  "
+                    f"{info.duration_text}  ?  "
+                    f"{info.video_codec}/{info.audio_codec}  ?  "
+                    f"{info.fps} FPS  ?  "
+                    f"{info.size / (1024 ** 3):.2f} GB<br>"
+                    f"Match: {member.similarity}%  ?  "
+                    f"{member.reason}<br>"
                     f"<span style='color:#8f96a3'>{info.path}</span>"
                 )
                 details.setWordWrap(True)
-                details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                details.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
                 details.setObjectName("groupDetails")
 
-                view = QPushButton("▶ Bekijk")
-                view.setToolTip("Open deze video in de bestaande VideoPreviewDialog")
-                view.clicked.connect(lambda _checked=False, path=info.path: self.finder.preview_path(path))
+                view = QPushButton("? Bekijk")
+                view.setToolTip(
+                    "Open deze video in de bestaande VideoPreviewDialog"
+                )
+                view.clicked.connect(
+                    lambda _checked=False, path=info.path:
+                    self.finder.preview_path(path)
+                )
 
+                row_layout.addWidget(thumbnail)
                 row_layout.addWidget(status)
                 row_layout.addWidget(details, 1)
                 row_layout.addWidget(view)
