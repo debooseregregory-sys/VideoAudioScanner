@@ -24,7 +24,6 @@ from duplicate_finder import DuplicateFinderWindow
 from duplicate_fixes import install_fixes
 from scanner import MediaResult, MediaScanner
 
-# Apply duplicate-video improvements from the real application startup path.
 install_fixes()
 
 
@@ -32,56 +31,33 @@ class ResultsModel(QAbstractTableModel):
     HEADERS = ["Naam", "Type", "Duur", "Resolutie", "Video codec", "Audio codec", "Bitrate", "Sample rate", "Kanalen", "FPS", "Container", "Grootte", "Status"]
 
     def __init__(self):
-        super().__init__()
-        self.items: list[MediaResult] = []
-
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.items)
-
-    def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.HEADERS)
-
+        super().__init__(); self.items: list[MediaResult] = []
+    def rowCount(self, parent=QModelIndex()): return 0 if parent.isValid() else len(self.items)
+    def columnCount(self, parent=QModelIndex()): return 0 if parent.isValid() else len(self.HEADERS)
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or not (0 <= index.row() < len(self.items)):
-            return None
+        if not index.isValid() or not (0 <= index.row() < len(self.items)): return None
         item = self.items[index.row()]
         values = [item.name, item.media_type, item.duration_text, item.resolution, item.video_codec, item.audio_codec, item.bitrate, item.sample_rate, item.channels, item.fps, item.container, item.size_text, item.status]
-        if role == Qt.ItemDataRole.DisplayRole:
-            return values[index.column()]
-        if role == Qt.ItemDataRole.ToolTipRole and index.column() == 0:
-            return item.path
-        if role == Qt.ItemDataRole.UserRole:
-            return item
+        if role == Qt.ItemDataRole.DisplayRole: return values[index.column()]
+        if role == Qt.ItemDataRole.ToolTipRole and index.column() == 0: return item.path
+        if role == Qt.ItemDataRole.UserRole: return item
         return None
-
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal: return self.HEADERS[section]
         return None
-
     def add(self, item: MediaResult):
-        row = len(self.items)
-        self.beginInsertRows(QModelIndex(), row, row)
-        self.items.append(item)
-        self.endInsertRows()
-
-    def clear(self):
-        self.beginResetModel(); self.items.clear(); self.endResetModel()
-
+        row = len(self.items); self.beginInsertRows(QModelIndex(), row, row); self.items.append(item); self.endInsertRows()
+    def clear(self): self.beginResetModel(); self.items.clear(); self.endResetModel()
     def remove_paths(self, paths: set[str]):
         if not paths: return
-        self.beginResetModel()
-        self.items = [item for item in self.items if item.path not in paths]
-        self.endResetModel()
+        self.beginResetModel(); self.items = [item for item in self.items if item.path not in paths]; self.endResetModel()
 
 
 class FilterProxy(QSortFilterProxyModel):
     def __init__(self):
         super().__init__(); self.text_filter = ""; self.type_filter = "Alle"; self.status_filter = "Alle"; self.setDynamicSortFilter(True)
-
     def set_filters(self, text: str, media_type: str, status: str):
         self.text_filter = text.casefold().strip(); self.type_filter = media_type; self.status_filter = status; self.invalidateFilter()
-
     def filterAcceptsRow(self, source_row, source_parent):
         item = self.sourceModel().items[source_row]
         if self.type_filter != "Alle" and item.media_type != self.type_filter: return False
@@ -95,8 +71,7 @@ class FilterProxy(QSortFilterProxyModel):
 
 class ScanWorker(QObject):
     result = Signal(object); progress = Signal(int, int); finished = Signal(bool); error = Signal(str)
-    def __init__(self, folder: str, ffprobe: str | None = None):
-        super().__init__(); self.folder = folder; self.ffprobe = ffprobe; self._cancel = False
+    def __init__(self, folder: str, ffprobe: str | None = None): super().__init__(); self.folder = folder; self.ffprobe = ffprobe; self._cancel = False
     def cancel(self): self._cancel = True
     def run(self):
         cancelled = False
@@ -132,8 +107,7 @@ def move_to_recycle_bin(paths: list[str]) -> tuple[list[str], list[str]]:
     FO_DELETE = 0x0003; FOF_SILENT = 0x0004; FOF_NOCONFIRMATION = 0x0010; FOF_ALLOWUNDO = 0x0040; FOF_NOERRORUI = 0x0400
     existing, failed = [], []
     for path in paths:
-        try:
-            (existing if Path(path).is_file() else failed).append(path)
+        try: (existing if Path(path).is_file() else failed).append(path)
         except OSError: failed.append(path)
     if not existing: return [], failed
     source = "".join(path + "\0" for path in existing) + "\0"
@@ -151,11 +125,10 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(18, 16, 18, 18); layout.setSpacing(10)
-        header = QHBoxLayout()
+        header = QHBoxLayout(); header.setContentsMargins(0, 0, 0, 2)
         title = QLabel("VideoAudioScanner"); title.setObjectName("title")
-        credit = QLabel("Made by Kid Acid"); credit.setObjectName("credit")
-        header.addWidget(title); header.addStretch(1); header.addWidget(credit)
-        layout.addLayout(header)
+        credit = QLabel("MADE BY KID ACID"); credit.setObjectName("credit"); credit.setAlignment(Qt.AlignmentFlag.AlignCenter); credit.setMinimumWidth(230); credit.setMinimumHeight(46)
+        header.addWidget(title); header.addStretch(1); header.addWidget(credit); layout.addLayout(header)
         subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe"); subtitle.setObjectName("subtitle"); layout.addWidget(subtitle)
         source_box = QGroupBox("Scanlocatie"); source_layout = QHBoxLayout(source_box); self.folder = QLineEdit(); self.folder.setPlaceholderText("Kies een map om recursief te scannen…"); self.folder.returnPressed.connect(self.start_scan)
         browse = QPushButton("Bladeren…"); browse.clicked.connect(self.choose_folder); self.scan_button = QPushButton("▶  Scan starten"); self.scan_button.setObjectName("primary"); self.scan_button.clicked.connect(self.start_scan); self.duplicate_button = QPushButton("🎞  Dubbele video's"); self.duplicate_button.setObjectName("secondary"); self.duplicate_button.clicked.connect(self.open_duplicate_finder); self.cancel_button = QPushButton("■  Stop"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_scan); self.export_button = QPushButton("CSV exporteren"); self.export_button.setEnabled(False); self.export_button.clicked.connect(self.export_csv)
@@ -179,7 +152,6 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         menu = self.menuBar().addMenu("Bestand"); export = QAction("CSV exporteren", self); export.triggered.connect(self.export_csv); menu.addAction(export); open_file = QAction("Geselecteerde bestanden openen", self); open_file.triggered.connect(self.open_selected); menu.addAction(open_file); duplicate = QAction("Dubbele video's", self); duplicate.triggered.connect(self.open_duplicate_finder); menu.addAction(duplicate); menu.addSeparator(); self.delete_action = QAction("Geselecteerde bestanden naar Prullenbak", self); self.delete_action.triggered.connect(self.delete_selected); menu.addAction(self.delete_action); menu.addSeparator(); ff = QAction("FFprobe instellingen", self); ff.triggered.connect(self.configure_ffprobe); menu.addAction(ff); menu.addSeparator(); quit_action = QAction("Afsluiten", self); quit_action.triggered.connect(self.close); menu.addAction(quit_action)
-
     def _apply_theme(self):
         self.setStyleSheet("""
             QWidget { background: #15171b; color: #e8eaed; font-size: 13px; }
@@ -187,7 +159,7 @@ class MainWindow(QMainWindow):
             QMenuBar::item { padding: 7px 12px; } QMenu::item { padding: 7px 22px; }
             QLabel#title { font-size: 30px; font-weight: 700; color: #ffffff; }
             QLabel#subtitle { color: #8f96a3; margin-bottom: 2px; }
-            QLabel#credit { color: #ffffff; font-size: 18px; font-weight: 700; padding: 7px 12px; background: #101216; border: 1px solid #2c3037; border-radius: 6px; }
+            QLabel#credit { color: #ffffff; font-size: 24px; font-weight: 900; letter-spacing: 2px; padding: 7px 18px; background: #101216; border: 2px solid #4b515c; border-radius: 10px; }
             QGroupBox { border: 1px solid #30343c; border-radius: 8px; margin-top: 8px; padding: 10px 8px 8px 8px; }
             QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #aeb5c0; }
             QLineEdit, QComboBox, QTableView { background: #1e2127; border: 1px solid #353a43; border-radius: 6px; }
@@ -198,17 +170,10 @@ class MainWindow(QMainWindow):
             QHeaderView::section { background: #252a31; color: #cfd4dc; padding: 8px; border: 0; border-right: 1px solid #343941; } QTableView { gridline-color: #30343b; } QTableView::item { padding: 6px; } QTableView::item:selected { background: #304a70; }
             QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { font-weight: 700; }
         """)
-
     def open_duplicate_finder(self):
-        folder = self.folder.text().strip()
-        self.duplicate_window = DuplicateFinderWindow()
-        if folder and os.path.isdir(folder):
-            self.duplicate_window.folder.setText(folder)
-        self.duplicate_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.duplicate_window.show()
-        self.duplicate_window.raise_()
-        self.duplicate_window.activateWindow()
-
+        folder = self.folder.text().strip(); self.duplicate_window = DuplicateFinderWindow()
+        if folder and os.path.isdir(folder): self.duplicate_window.folder.setText(folder)
+        self.duplicate_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True); self.duplicate_window.show(); self.duplicate_window.raise_(); self.duplicate_window.activateWindow()
     def _restore_state(self):
         geometry = self.settings.value("geometry")
         if geometry: self.restoreGeometry(geometry)
