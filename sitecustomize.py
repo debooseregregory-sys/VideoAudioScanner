@@ -124,6 +124,10 @@ try:
 
     duplicate_finder.DuplicateFinderWindow._build_ui = _professional_build_ui
 
+    # --- Professional duplicate group comparison ---
+    from professional_groups import install as install_professional_groups
+    install_professional_groups(duplicate_finder.DuplicateFinderWindow)
+
     # --- Completion popup + audible notification ---
     _original_scan_finished = duplicate_finder.DuplicateFinderWindow.scan_finished
 
@@ -144,7 +148,6 @@ try:
             except Exception:
                 pass
 
-        # Update the visible dashboard with the real result numbers.
         try:
             self._vas_group_value.setText(str(groups))
             self._vas_files_value.setText(str(len(candidates)))
@@ -170,5 +173,4 @@ try:
     duplicate_finder.DuplicateFinderWindow.scan_finished = _scan_finished_with_notification
 
 except Exception:
-    # Optional patches must never prevent VideoAudioScanner from starting.
     pass
