@@ -11,7 +11,7 @@ from pathlib import Path
 import duplicate_finder as df
 
 CACHE_NAME = ".videoaudioscanner_duplicates.json"
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 
 def _visual_hashes(ffmpeg: str, path: str, duration: float) -> list[int]:
@@ -82,7 +82,7 @@ def _load_cache(folder):
         data = json.loads(_cache_path(folder).read_text(encoding="utf-8"))
         if data.get("version") != CACHE_VERSION:
             return {}
-        return data.get("videos", {})
+        return data.get("videos", {}) if isinstance(data.get("videos", {}), dict) else {}
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return {}
 
@@ -160,9 +160,8 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             records.pop(item["path"], None)
         _report(progress, index, len(inventory))
 
-    # Build inexpensive candidate buckets first. We deliberately do NOT create
-    # visual fingerprints for all videos: that was the cause of the apparent
-    # hang at the end of large scans.
+    # Candidate generation is deliberately bounded. The old implementation could
+    # build O(n²) pairs for a large library and appear to hang after the scan.
     candidate_pairs = []
     seen = set()
     candidate_paths = set()
@@ -176,6 +175,7 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
         candidate_paths.add(a.path)
         candidate_paths.add(b.path)
 
+    # Same/near-same names: compare all pairs, but only inside tight metadata buckets.
     name_groups = {}
     for info in infos:
         duration_bucket = int(round(info.duration / 5.0)) if info.duration > 0 else 0
@@ -188,6 +188,9 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
             for second in candidates[i + 1:]:
                 add_pair(first, second)
 
+    # Different filenames: use the same duration/aspect/resolution bucket, but
+    # compare only the nearest files by size. This preserves useful visual matching
+    # while guaranteeing bounded work for very large folders.
     buckets = {}
     for info in infos:
         if info.duration <= 0 or not info.width or not info.height:
@@ -195,11 +198,16 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
         key = (int(round(info.duration / 5.0)), round(info.width / info.height, 2), info.width, info.height)
         buckets.setdefault(key, []).append(info)
     for candidates in buckets.values():
-        if len(candidates) > 60:
+        if len(candidates) > 250:
             continue
-        for i, first in enumerate(candidates):
-            for second in candidates[i + 1:]:
-                if _name_key(first.name) != _name_key(second.name):
+        ordered = sorted(candidates, key=lambda x: x.size)
+        for i, first in enumerate(ordered):
+            neighbours = ordered[max(0, i - 6):min(len(ordered), i + 7)]
+            for second in neighbours:
+                if second is first or _name_key(first.name) == _name_key(second.name):
+                    continue
+                low, high = sorted((first.size, second.size))
+                if low and high / low <= 1.35:
                     add_pair(first, second)
 
     # Exact duplicates only need hashing when a file size occurs more than once.
@@ -219,15 +227,17 @@ def _analyse_videos_incremental(folder, ffprobe, ffmpeg, progress=None):
                 digest = ""
             if digest:
                 hashes.setdefault(digest, []).append(info)
+                info.video_hash = digest
         for same in hashes.values():
             if len(same) > 1:
                 exact_groups.append(same)
                 used.update(x.path for x in same)
 
-    # Fingerprint only visual candidates, reusing cache whenever possible.
+    # Fingerprint only bounded visual candidates and reuse cached fingerprints.
     fingerprints = {}
+    info_by_path = {x.path: x for x in infos}
     for path in candidate_paths:
-        info = next((x for x in infos if x.path == path), None)
+        info = info_by_path.get(path)
         if info is None:
             continue
         record = records.get(path, {})
