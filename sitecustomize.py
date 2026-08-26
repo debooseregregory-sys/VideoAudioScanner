@@ -4,7 +4,7 @@ try:
     import os
     from pathlib import Path
     import winsound
-    from PySide6.QtCore import QUrl
+    from PySide6.QtCore import QUrl, QTimer
     from PySide6.QtWidgets import QMessageBox, QApplication
     import duplicate_finder
 
@@ -41,10 +41,7 @@ try:
     duplicate_finder.VideoPreviewDialog.__init__ = _preview_init
     duplicate_finder.VideoPreviewDialog.closeEvent = _preview_close
 
-    # The previous lock wrapper looked at the media source after the preview
-    # had already been altered. Store the path directly instead and release
-    # matching previews BEFORE the Shell delete operation.
-    _original_delete_selected = duplicate_finder.DuplicateFinderWindow.delete_selected
+    _base_delete_selected = duplicate_finder.DuplicateFinderWindow.delete_selected
 
     def _delete_selected_with_release(self):
         paths = []
@@ -64,18 +61,23 @@ try:
                 except Exception:
                     pass
 
-        # Process the close event immediately so QMediaPlayer releases its
-        # native handle before SHFileOperation is called.
         try:
             QApplication.processEvents()
         except Exception:
             pass
+        return _base_delete_selected(self)
 
-        return _original_delete_selected(self)
+    def _install_delete_wrapper():
+        # main.py calls its original imported install_fixes() after
+        # sitecustomize, so re-apply our wrapper once the application has
+        # finished constructing its main window.
+        duplicate_finder.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
 
     duplicate_finder.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
+    QTimer.singleShot(0, _install_delete_wrapper)
+    QTimer.singleShot(250, _install_delete_wrapper)
 
-    # Replace the old completion wrapper with a single, explicit notification.
+    # Replace the old completion wrapper with one clear notification.
     _original_scan_finished = duplicate_finder.DuplicateFinderWindow.scan_finished
 
     def _scan_finished_with_notification(self, rows):
@@ -87,11 +89,13 @@ try:
         gib = bytes_to_reclaim / (1024 ** 3)
 
         try:
-            winsound.MessageBeep(winsound.MB_ICONINFORMATION)
+            # Use an actual audible Windows tone rather than relying only on
+            # configurable system notification sounds.
+            winsound.Beep(880, 180)
+            winsound.Beep(1046, 180)
         except Exception:
             try:
-                import ctypes
-                ctypes.windll.user32.MessageBeep(0x00000040)
+                winsound.MessageBeep(winsound.MB_ICONINFORMATION)
             except Exception:
                 pass
 
@@ -106,10 +110,7 @@ try:
                 "Exacte duplicaten en vermoedelijke duplicaten staan in de lijst."
             )
         else:
-            text = (
-                "De analyse van de dubbele video's is volledig klaar.\n\n"
-                "Geen dubbele video's gevonden."
-            )
+            text = "De analyse van de dubbele video's is volledig klaar.\n\nGeen dubbele video's gevonden."
         QMessageBox.information(self, "🎬 Analyse voltooid", text)
 
     duplicate_finder.DuplicateFinderWindow.scan_finished = _scan_finished_with_notification
