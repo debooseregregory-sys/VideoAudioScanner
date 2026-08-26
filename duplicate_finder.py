@@ -11,7 +11,23 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QDialog
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QDialog,
+)
 
 from scanner import VIDEO_EXTENSIONS, MediaScanner
 
@@ -272,6 +288,160 @@ def open_video(path: str):
         QMessageBox.warning(None, "Video openen", f"Kan de video niet openen:\n\n{path}\n\n{exc}")
 
 
+class DuplicateGroupDialog(QDialog):
+    """Modeless professional overview of the duplicate groups from the last scan."""
+
+    def __init__(self, finder: "DuplicateFinderWindow"):
+        super().__init__(finder)
+        self.finder = finder
+        self.setWindowTitle("VideoAudioScanner — Duplicaatgroepen")
+        self.resize(1280, 820)
+        self.setModal(False)
+        self._build_ui()
+        self.refresh()
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 18)
+        outer.setSpacing(10)
+
+        header = QHBoxLayout()
+        title = QLabel("DUPLICAATGROEPEN")
+        title.setObjectName("groupTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.summary = QLabel()
+        self.summary.setObjectName("groupSummary")
+        header.addWidget(self.summary)
+        outer.addLayout(header)
+
+        self.hint = QLabel("Elke groep toont de vermoedelijk beste versie bovenaan. Met ▶ Bekijk gebruik je dezelfde videopreview als in de hoofdweergave.")
+        self.hint.setWordWrap(True)
+        self.hint.setObjectName("groupHint")
+        outer.addWidget(self.hint)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(2, 2, 2, 2)
+        self.content_layout.setSpacing(14)
+        self.scroll.setWidget(self.content)
+        outer.addWidget(self.scroll, 1)
+
+        controls = QHBoxLayout()
+        refresh = QPushButton("↻ Vernieuwen")
+        refresh.clicked.connect(self.refresh)
+        close = QPushButton("Sluiten")
+        close.clicked.connect(self.close)
+        controls.addWidget(refresh)
+        controls.addStretch(1)
+        controls.addWidget(close)
+        outer.addLayout(controls)
+
+        self.setStyleSheet("""
+            QDialog { background: #101216; color: #e8eaed; }
+            QLabel#groupTitle { font-size: 26px; font-weight: 800; color: #ffffff; }
+            QLabel#groupSummary { color: #aeb5c0; font-size: 14px; }
+            QLabel#groupHint { color: #8f96a3; padding-bottom: 4px; }
+            QFrame#groupCard { background: #1b1f25; border: 1px solid #343a44; border-radius: 10px; }
+            QLabel#groupNumber { font-size: 17px; font-weight: 800; color: #ffffff; }
+            QLabel#groupKind { font-weight: 700; color: #8eb7ef; }
+            QLabel#keep { color: #8fd19e; font-weight: 800; }
+            QLabel#delete { color: #e58b91; font-weight: 800; }
+            QLabel#groupDetails { color: #d5dae1; padding: 5px; }
+            QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 6px; padding: 8px 13px; }
+            QPushButton:hover { background: #353b45; }
+        """)
+
+    def _clear_cards(self):
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def refresh(self):
+        self._clear_cards()
+        rows = list(self.finder.rows or [])
+        groups: dict[int, list[DuplicateCandidate]] = {}
+        for row in rows:
+            groups.setdefault(row.group, []).append(row)
+
+        recommended_size = sum(row.info.size for row in rows if row.recommended_delete)
+        self.summary.setText(
+            f"{len(groups)} groepen  •  {len(rows)} bestanden  •  "
+            f"{recommended_size / (1024 ** 3):.2f} GB aanbevolen ruimtewinst"
+        )
+
+        if not rows:
+            empty = QFrame()
+            empty.setObjectName("groupCard")
+            empty_layout = QVBoxLayout(empty)
+            message = QLabel("Er zijn nog geen duplicaten om te tonen.\n\nKies een map en start eerst een duplicatenscan.")
+            message.setWordWrap(True)
+            message.setStyleSheet("font-size: 16px; color: #aeb5c0; padding: 35px;")
+            empty_layout.addWidget(message)
+            self.content_layout.addWidget(empty)
+            self.content_layout.addStretch(1)
+            return
+
+        for group_no in sorted(groups):
+            members = sorted(groups[group_no], key=lambda row: (row.recommended_delete, -quality_score(row.info), row.info.name.casefold()))
+            card = QFrame()
+            card.setObjectName("groupCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setSpacing(8)
+
+            header = QHBoxLayout()
+            group_label = QLabel(f"DUPLICAATGROEP {group_no:03d}")
+            group_label.setObjectName("groupNumber")
+            exact = all(member.info.video_hash for member in members)
+            kind = QLabel("◆ EXACT DUPLICAAT" if exact else "◈ VISUELE MATCH")
+            kind.setObjectName("groupKind")
+            header.addWidget(group_label)
+            header.addStretch(1)
+            header.addWidget(kind)
+            card_layout.addLayout(header)
+
+            for member in members:
+                info = member.info
+                row_layout = QHBoxLayout()
+                status = QLabel("★ BEWAREN" if not member.recommended_delete else "● VERWIJDEREN")
+                status.setObjectName("keep" if not member.recommended_delete else "delete")
+                status.setMinimumWidth(135)
+
+                details = QLabel(
+                    f"<b>{info.name}</b><br>"
+                    f"{info.resolution}  •  {info.bitrate_text}  •  {info.duration_text}  •  "
+                    f"{info.video_codec}/{info.audio_codec}  •  {info.fps} FPS  •  {info.size / (1024 ** 3):.2f} GB<br>"
+                    f"Match: {member.similarity}%  —  {member.reason}<br>"
+                    f"<span style='color:#8f96a3'>{info.path}</span>"
+                )
+                details.setWordWrap(True)
+                details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                details.setObjectName("groupDetails")
+
+                view = QPushButton("▶ Bekijk")
+                view.setToolTip("Open deze video in de bestaande VideoPreviewDialog")
+                view.clicked.connect(lambda _checked=False, path=info.path: self.finder.preview_path(path))
+
+                row_layout.addWidget(status)
+                row_layout.addWidget(details, 1)
+                row_layout.addWidget(view)
+                card_layout.addLayout(row_layout)
+
+            self.content_layout.addWidget(card)
+
+        self.content_layout.addStretch(1)
+
+    def closeEvent(self, event):
+        self.finder.group_view_window = None
+        super().closeEvent(event)
+
+
 class DuplicateFinderWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -280,6 +450,7 @@ class DuplicateFinderWindow(QMainWindow):
         self.worker: FinderWorker | None = None
         self.rows: list[DuplicateCandidate] = []
         self.preview_windows: list[VideoPreviewDialog] = []
+        self.group_view_window: DuplicateGroupDialog | None = None
         self._build_ui()
         self._apply_theme()
 
@@ -331,6 +502,10 @@ class DuplicateFinderWindow(QMainWindow):
         actions = QHBoxLayout()
         preview = QPushButton("▶ Video bekijken")
         preview.clicked.connect(self.preview_selected)
+        self.group_button = QPushButton("▦ Groepsweergave — duplicaten vergelijken")
+        self.group_button.setObjectName("groupViewButton")
+        self.group_button.setToolTip("Bekijk de gevonden duplicaten overzichtelijk per groep, met de beste versie bovenaan.")
+        self.group_button.clicked.connect(self.show_duplicate_groups)
         self.select_bad = QPushButton("Slechte versies selecteren")
         self.select_bad.clicked.connect(self.select_bad_versions)
         clear = QPushButton("Alles uitvinken")
@@ -339,6 +514,7 @@ class DuplicateFinderWindow(QMainWindow):
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self.delete_selected)
         actions.addWidget(preview)
+        actions.addWidget(self.group_button)
         actions.addWidget(self.select_bad)
         actions.addWidget(clear)
         actions.addStretch(1)
@@ -359,6 +535,8 @@ class DuplicateFinderWindow(QMainWindow):
             QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 6px; padding: 9px 14px; }
             QPushButton:hover { background: #353b45; }
             QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; }
+            QPushButton#groupViewButton { background: #315f9e; border-color: #5686c4; font-weight: 700; }
+            QPushButton#groupViewButton:hover { background: #3b70b8; }
             QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; }
             QTableWidget { background: #1e2127; border: 1px solid #353a43; gridline-color: #30343c; }
             QHeaderView::section { background: #252a31; padding: 7px; border: 0; }
@@ -387,6 +565,8 @@ class DuplicateFinderWindow(QMainWindow):
             return
         self.rows.clear()
         self.table.setRowCount(0)
+        if self.group_view_window is not None:
+            self.group_view_window.close()
         self.scan_button.setEnabled(False)
         self.progress.setRange(0, 0)
         self.status.setText("Video's analyseren…")
@@ -406,6 +586,8 @@ class DuplicateFinderWindow(QMainWindow):
         self.rows = list(rows)
         self.populate_table()
         self.status.setText(f"Klaar — {len(self.rows)} duplicaat-kandidaten gevonden.")
+        if self.group_view_window is not None:
+            self.group_view_window.refresh()
 
     def scan_error(self, message: str):
         self.progress.setRange(0, 1)
@@ -440,6 +622,9 @@ class DuplicateFinderWindow(QMainWindow):
         path = self.selected_path(row)
         if not path:
             return
+        self.preview_path(path)
+
+    def preview_path(self, path: str):
         if not os.path.isfile(path):
             QMessageBox.warning(self, "Video bekijken", "Het bestand bestaat niet meer:\n\n" + path)
             return
@@ -460,6 +645,18 @@ class DuplicateFinderWindow(QMainWindow):
             QMessageBox.information(self, "Video bekijken", "Selecteer eerst een video in de tabel.")
             return
         self.preview_row(rows[0])
+
+    def show_duplicate_groups(self):
+        if self.group_view_window is not None:
+            self.group_view_window.refresh()
+            self.group_view_window.show()
+            self.group_view_window.raise_()
+            self.group_view_window.activateWindow()
+            return
+        self.group_view_window = DuplicateGroupDialog(self)
+        self.group_view_window.show()
+        self.group_view_window.raise_()
+        self.group_view_window.activateWindow()
 
     def select_bad_versions(self):
         for row, candidate in enumerate(self.rows):
