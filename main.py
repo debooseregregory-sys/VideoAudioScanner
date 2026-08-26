@@ -21,7 +21,11 @@ from PySide6.QtWidgets import (
 )
 
 from duplicate_finder import DuplicateFinderWindow
+from duplicate_fixes import install_fixes
 from scanner import MediaResult, MediaScanner
+
+# Apply duplicate-video improvements from the real application startup path.
+install_fixes()
 
 
 class ResultsModel(QAbstractTableModel):
