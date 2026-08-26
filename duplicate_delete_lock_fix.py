@@ -1,11 +1,8 @@
-"""Release internal video preview handles before moving files to the Windows Recycle Bin."""
+"""Release internal video preview file handles before moving files to the Windows Recycle Bin."""
 
 from pathlib import Path
-
 from PySide6.QtCore import QUrl
-
 import duplicate_finder as df
-
 
 _original_install_fixes = df.install_fixes
 
@@ -28,7 +25,6 @@ def _release_previews(window, paths):
             else:
                 remaining.append(preview)
         except Exception:
-            # A preview that cannot be queried must not prevent deletion of other files.
             try:
                 preview.close()
             except Exception:
@@ -45,17 +41,16 @@ def _delete_selected_with_release(self):
             if path and Path(path).is_file():
                 paths.append(str(path))
 
-    if not paths:
-        return self._original_delete_selected()
-
-    # Close only previews belonging to files that are actually being deleted.
-    # This releases QMediaPlayer/FFmpeg file handles before SHFileOperation runs.
-    _release_previews(self, paths)
-    return self._original_delete_selected()
+    original = getattr(_delete_selected_with_release, "_original_delete_selected", None)
+    if original is None:
+        raise RuntimeError("Prullenbakfunctie is niet correct geïnitialiseerd.")
+    if paths:
+        _release_previews(self, paths)
+    return original(self)
 
 
 def apply():
-    """Wrap duplicate_fixes installation so the lock-safe delete stays installed."""
+    """Wrap duplicate_fixes installation so preview locks are released before deletion."""
     if getattr(df, "_lock_fix_installed", False):
         return
 
@@ -65,8 +60,6 @@ def apply():
         if current is not _delete_selected_with_release:
             _delete_selected_with_release._original_delete_selected = current
             df.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
-            # Keep a direct reference for the wrapper; it is also useful if install_fixes runs again.
-            _delete_selected_with_release._original_delete_selected = current
 
     df.install_fixes = wrapped_install_fixes
     wrapped_install_fixes()
