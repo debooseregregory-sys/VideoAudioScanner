@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -346,15 +347,14 @@ def create_video_thumbnail(ffmpeg: str | None, path: str, duration: float) -> QP
         return QPixmap()
 
 
-class DuplicateGroupDialog(QDialog):
+class DuplicateGroupDialog(QWidget):
     """Modeless professional overview of the duplicate groups from the last scan."""
 
     def __init__(self, finder: "DuplicateFinderWindow"):
         super().__init__(finder)
         self.finder = finder
         self.setWindowTitle("VideoAudioScanner — Duplicaatgroepen")
-        self.resize(1280, 820)
-        self.setModal(False)
+        self.setObjectName("duplicateGroupsPage")
         self._build_ui()
         self.refresh()
 
@@ -391,8 +391,8 @@ class DuplicateGroupDialog(QDialog):
         controls = QHBoxLayout()
         refresh = QPushButton("↻ Vernieuwen")
         refresh.clicked.connect(self.refresh)
-        close = QPushButton("Sluiten")
-        close.clicked.connect(self.close)
+        close = QPushButton("? Terug naar resultaten")
+        close.clicked.connect(self.finder.show_results_view)
         controls.addWidget(refresh)
         controls.addStretch(1)
         controls.addWidget(close)
@@ -542,11 +542,6 @@ class DuplicateGroupDialog(QDialog):
 
         self.content_layout.addStretch(1)
 
-    def closeEvent(self, event):
-        self.finder.group_view_window = None
-        super().closeEvent(event)
-
-
 class DuplicateFinderWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -555,13 +550,19 @@ class DuplicateFinderWindow(QMainWindow):
         self.worker: FinderWorker | None = None
         self.rows: list[DuplicateCandidate] = []
         self.preview_windows: list[VideoPreviewDialog] = []
-        self.group_view_window: DuplicateGroupDialog | None = None
         self._build_ui()
         self._apply_theme()
 
     def _build_ui(self):
         root = QWidget()
-        layout = QVBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.pages = QStackedWidget()
+        root_layout.addWidget(self.pages)
+
+        results_page = QWidget()
+        layout = QVBoxLayout(results_page)
         layout.setContentsMargins(18, 16, 18, 18)
         layout.setSpacing(10)
         header = QHBoxLayout()
@@ -625,6 +626,12 @@ class DuplicateFinderWindow(QMainWindow):
         actions.addStretch(1)
         actions.addWidget(self.delete_button)
         layout.addLayout(actions)
+        self.pages.addWidget(results_page)
+
+        self.group_page = DuplicateGroupDialog(self)
+        self.pages.addWidget(self.group_page)
+        self.pages.setCurrentWidget(results_page)
+
         self.setCentralWidget(root)
 
     def _apply_theme(self):
@@ -670,8 +677,7 @@ class DuplicateFinderWindow(QMainWindow):
             return
         self.rows.clear()
         self.table.setRowCount(0)
-        if self.group_view_window is not None:
-            self.group_view_window.close()
+        self.pages.setCurrentIndex(0)
         self.scan_button.setEnabled(False)
         self.progress.setRange(0, 0)
         self.status.setText("Video's analyseren…")
@@ -691,8 +697,7 @@ class DuplicateFinderWindow(QMainWindow):
         self.rows = list(rows)
         self.populate_table()
         self.status.setText(f"Klaar — {len(self.rows)} duplicaat-kandidaten gevonden.")
-        if self.group_view_window is not None:
-            self.group_view_window.refresh()
+        self.group_page.refresh()
 
     def scan_error(self, message: str):
         self.progress.setRange(0, 1)
@@ -752,16 +757,11 @@ class DuplicateFinderWindow(QMainWindow):
         self.preview_row(rows[0])
 
     def show_duplicate_groups(self):
-        if self.group_view_window is not None:
-            self.group_view_window.refresh()
-            self.group_view_window.show()
-            self.group_view_window.raise_()
-            self.group_view_window.activateWindow()
-            return
-        self.group_view_window = DuplicateGroupDialog(self)
-        self.group_view_window.show()
-        self.group_view_window.raise_()
-        self.group_view_window.activateWindow()
+        self.group_page.refresh()
+        self.pages.setCurrentWidget(self.group_page)
+
+    def show_results_view(self):
+        self.pages.setCurrentIndex(0)
 
     def select_bad_versions(self):
         for row, candidate in enumerate(self.rows):
