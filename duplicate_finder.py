@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QCheckBox,
     QDialog,
 )
 
@@ -494,6 +495,20 @@ class DuplicateGroupDialog(QWidget):
                 else:
                     thumbnail.setText("GEEN\nVOORBEELD")
 
+                select = QCheckBox()
+                select.setChecked(
+                    self.finder.is_path_checked(info.path)
+                )
+                select.setToolTip(
+                    "Selecteer deze video voor de bestaande "
+                    "Prullenbakfunctie"
+                )
+                select.setFixedWidth(28)
+                select.toggled.connect(
+                    lambda checked, path=info.path:
+                    self.finder.set_path_checked(path, checked)
+                )
+
                 status = QLabel(
                     "? BEWAREN"
                     if not member.recommended_delete
@@ -532,6 +547,7 @@ class DuplicateGroupDialog(QWidget):
                     self.finder.preview_path(path)
                 )
 
+                row_layout.addWidget(select)
                 row_layout.addWidget(thumbnail)
                 row_layout.addWidget(status)
                 row_layout.addWidget(details, 1)
@@ -722,6 +738,26 @@ class DuplicateFinderWindow(QMainWindow):
                 item.setToolTip(candidate.info.path if column == 3 else value)
                 self.table.setItem(row, column, item)
 
+    def is_path_checked(self, path: str) -> bool:
+        """Lees de bestaande selectiestatus van een video uit de tabel."""
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == path:
+                return item.checkState() == Qt.CheckState.Checked
+        return False
+
+    def set_path_checked(self, path: str, checked: bool):
+        """Wijzig de bestaande tabelselectie vanuit de groepsweergave."""
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == path:
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if checked
+                    else Qt.CheckState.Unchecked
+                )
+                return
+
     def selected_path(self, row: int) -> str | None:
         if row < 0 or row >= self.table.rowCount():
             return None
@@ -767,13 +803,21 @@ class DuplicateFinderWindow(QMainWindow):
         for row, candidate in enumerate(self.rows):
             item = self.table.item(row, 0)
             if item:
-                item.setCheckState(Qt.CheckState.Checked if candidate.recommended_delete else Qt.CheckState.Unchecked)
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if candidate.recommended_delete
+                    else Qt.CheckState.Unchecked
+                )
+        if hasattr(self, "group_page"):
+            self.group_page.refresh()
 
     def clear_checks(self):
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item:
                 item.setCheckState(Qt.CheckState.Unchecked)
+        if hasattr(self, "group_page"):
+            self.group_page.refresh()
 
     def delete_selected(self):
         paths = []
