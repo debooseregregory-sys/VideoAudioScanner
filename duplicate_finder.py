@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import shutil
@@ -300,7 +301,6 @@ class DuplicateFinderWindow(QMainWindow):
         info.setWordWrap(True)
         info.setObjectName("subtitle")
         layout.addWidget(info)
-
         source = QGroupBox("Scanlocatie")
         source_layout = QHBoxLayout(source)
         self.folder = QLabel("Geen map gekozen")
@@ -319,7 +319,6 @@ class DuplicateFinderWindow(QMainWindow):
         layout.addWidget(self.progress)
         self.status = QLabel("Klaar om te zoeken.")
         layout.addWidget(self.status)
-
         self.table = QTableWidget(0, 12)
         self.table.setHorizontalHeaderLabels(["Verwijderen", "Voorbeeld", "Groep", "Bestand", "Resolutie", "Bitrate", "Duur", "Video codec", "Audio codec", "FPS", "Container", "Overeenkomst / beoordeling"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -329,7 +328,6 @@ class DuplicateFinderWindow(QMainWindow):
             self.table.setColumnWidth(index, width)
         self.table.cellDoubleClicked.connect(self.preview_row)
         layout.addWidget(self.table, 1)
-
         actions = QHBoxLayout()
         preview = QPushButton("▶ Video bekijken")
         preview.clicked.connect(self.preview_selected)
@@ -507,14 +505,29 @@ class DuplicateFinderWindow(QMainWindow):
 def send_to_recycle_bin(path: str):
     if os.name != "nt":
         raise RuntimeError("De Windows Prullenbak is alleen beschikbaar op Windows.")
-    import ctypes
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
     from ctypes import wintypes
+
     class SHFILEOPSTRUCTW(ctypes.Structure):
-        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.USHORT), ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.UINT),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
     operation = SHFILEOPSTRUCTW()
-    operation.wFunc = 0x0003
-    operation.pFrom = str(Path(path).resolve()) + "\0\0"
-    operation.fFlags = 0x0040 | 0x0010 | 0x0004
+    operation.wFunc = 0x0003  # FO_DELETE
+    operation.pFrom = str(resolved) + "\0\0"
+    operation.fFlags = 0x0040 | 0x0010 | 0x0004  # FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
     result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-    if result != 0 or operation.fAnyOperationsAborted:
-        raise OSError(result or "Windows heeft de operatie afgebroken")
+    if result != 0:
+        raise OSError(f"Windows SHFileOperation foutcode {result}")
+    if operation.fAnyOperationsAborted:
+        raise OSError("Windows heeft de operatie afgebroken")
