@@ -4,17 +4,14 @@ try:
     import os
     from pathlib import Path
     import winsound
-    from PySide6.QtCore import QUrl, QTimer
-    from PySide6.QtWidgets import QMessageBox, QApplication
+    from PySide6.QtCore import QUrl, QTimer, Qt
+    from PySide6.QtWidgets import QMessageBox, QApplication, QFrame, QLabel, QHBoxLayout, QVBoxLayout
     import duplicate_finder
 
-    # Install the existing duplicate-engine improvements first.
     from duplicate_fixes import install_fixes
     install_fixes()
 
-    # Keep the preview dialog object, but completely detach its multimedia
-    # source when it closes. QMediaPlayer can otherwise keep a Windows file
-    # handle alive even after stop().
+    # --- Reliable preview release before Windows recycle-bin operations ---
     _original_preview_init = duplicate_finder.VideoPreviewDialog.__init__
     _original_preview_close = duplicate_finder.VideoPreviewDialog.closeEvent
 
@@ -67,17 +64,67 @@ try:
             pass
         return _base_delete_selected(self)
 
+    duplicate_finder.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
+
     def _install_delete_wrapper():
-        # main.py calls its original imported install_fixes() after
-        # sitecustomize, so re-apply our wrapper once the application has
-        # finished constructing its main window.
         duplicate_finder.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
 
-    duplicate_finder.DuplicateFinderWindow.delete_selected = _delete_selected_with_release
     QTimer.singleShot(0, _install_delete_wrapper)
     QTimer.singleShot(250, _install_delete_wrapper)
 
-    # Replace the old completion wrapper with one clear notification.
+    # --- Professional, clearly visible dashboard ---
+    _original_build_ui = duplicate_finder.DuplicateFinderWindow._build_ui
+
+    def _professional_build_ui(self):
+        _original_build_ui(self)
+        root = self.centralWidget()
+        layout = root.layout() if root else None
+        if layout is None:
+            return
+
+        dashboard = QFrame()
+        dashboard.setObjectName("duplicateDashboard")
+        dash_layout = QHBoxLayout(dashboard)
+        dash_layout.setContentsMargins(14, 10, 14, 10)
+        dash_layout.setSpacing(10)
+
+        self._vas_group_value = QLabel("0")
+        self._vas_files_value = QLabel("0")
+        self._vas_recommended_value = QLabel("0")
+        self._vas_space_value = QLabel("0 GB")
+        for value in (self._vas_group_value, self._vas_files_value, self._vas_recommended_value, self._vas_space_value):
+            value.setObjectName("dashValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        cards = [
+            ("DUPLICAATGROEPEN", self._vas_group_value),
+            ("DUBBELE BESTANDEN", self._vas_files_value),
+            ("AANBEVOLEN", self._vas_recommended_value),
+            ("RUIMTEWINST", self._vas_space_value),
+        ]
+        for caption, value in cards:
+            card = QFrame()
+            card.setObjectName("dashCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 7, 10, 7)
+            label = QLabel(caption)
+            label.setObjectName("dashCaption")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(label)
+            card_layout.addWidget(value)
+            dash_layout.addWidget(card, 1)
+
+        layout.insertWidget(1, dashboard)
+        self.setStyleSheet(self.styleSheet() + """
+            QFrame#duplicateDashboard { background: #0d1015; border: 1px solid #3b4350; border-radius: 12px; }
+            QFrame#dashCard { background: #191e26; border: 1px solid #303844; border-radius: 9px; }
+            QLabel#dashCaption { color: #8f99a8; font-size: 10px; font-weight: 800; letter-spacing: 1px; }
+            QLabel#dashValue { color: #ffffff; font-size: 25px; font-weight: 900; padding: 2px; }
+        """)
+
+    duplicate_finder.DuplicateFinderWindow._build_ui = _professional_build_ui
+
+    # --- Completion popup + audible notification ---
     _original_scan_finished = duplicate_finder.DuplicateFinderWindow.scan_finished
 
     def _scan_finished_with_notification(self, rows):
@@ -89,8 +136,6 @@ try:
         gib = bytes_to_reclaim / (1024 ** 3)
 
         try:
-            # Use an actual audible Windows tone rather than relying only on
-            # configurable system notification sounds.
             winsound.Beep(880, 180)
             winsound.Beep(1046, 180)
         except Exception:
@@ -98,6 +143,15 @@ try:
                 winsound.MessageBeep(winsound.MB_ICONINFORMATION)
             except Exception:
                 pass
+
+        # Update the visible dashboard with the real result numbers.
+        try:
+            self._vas_group_value.setText(str(groups))
+            self._vas_files_value.setText(str(len(candidates)))
+            self._vas_recommended_value.setText(str(len(recommended)))
+            self._vas_space_value.setText(f"{gib:.2f} GB")
+        except Exception:
+            pass
 
         if candidates:
             text = (
@@ -116,5 +170,5 @@ try:
     duplicate_finder.DuplicateFinderWindow.scan_finished = _scan_finished_with_notification
 
 except Exception:
-    # Optional UI fixes must never prevent VideoAudioScanner from starting.
+    # Optional patches must never prevent VideoAudioScanner from starting.
     pass
