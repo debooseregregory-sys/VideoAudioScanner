@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import os
@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
         header.addWidget(title); header.addStretch(1); header.addWidget(credit); layout.addLayout(header)
         subtitle = QLabel("Analyseer video- en audiobestanden met FFprobe"); subtitle.setObjectName("subtitle"); layout.addWidget(subtitle)
         source_box = QGroupBox("Scanlocatie"); source_layout = QHBoxLayout(source_box); self.folder = QLineEdit(); self.folder.setPlaceholderText("Kies een map om recursief te scannen…"); self.folder.returnPressed.connect(self.start_scan)
-        browse = QPushButton("Bladeren…"); browse.clicked.connect(self.choose_folder); self.scan_button = QPushButton("▶  Scan starten"); self.scan_button.setObjectName("primary"); self.scan_button.clicked.connect(self.start_scan); self.duplicate_button = QPushButton("DUBBELE VIDEO"); self.duplicate_button.setObjectName("secondary"); self.duplicate_button.clicked.connect(self.open_duplicate_finder); self.cancel_button = QPushButton("STOP"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_scan); self.export_button = QPushButton("CSV exporteren"); self.export_button.setEnabled(False); self.export_button.clicked.connect(self.export_csv)
+        browse = QPushButton("Bladeren…"); browse.clicked.connect(self.choose_folder); self.scan_button = QPushButton("▶  Scan starten"); self.scan_button.setObjectName("primary"); self.scan_button.clicked.connect(self.start_scan); self.duplicate_button = QPushButton("🎞  Dubbele video's"); self.duplicate_button.setObjectName("secondary"); self.duplicate_button.clicked.connect(self.open_duplicate_finder); self.cancel_button = QPushButton("■  Stop"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_scan); self.export_button = QPushButton("CSV exporteren"); self.export_button.setEnabled(False); self.export_button.clicked.connect(self.export_csv)
         source_layout.addWidget(self.folder, 1); source_layout.addWidget(browse); source_layout.addWidget(self.scan_button); source_layout.addWidget(self.duplicate_button); source_layout.addWidget(self.cancel_button); source_layout.addWidget(self.export_button); layout.addWidget(source_box)
         ff_box = QGroupBox("FFprobe"); ff_layout = QHBoxLayout(ff_box); self.ffprobe_status = QLabel("Controleren…"); self.ffprobe_status.setObjectName("ffprobeStatus"); self.ffprobe_path = QLabel(""); self.ffprobe_path.setObjectName("status"); ff_layout.addWidget(self.ffprobe_status); ff_layout.addWidget(self.ffprobe_path, 1); ff_settings = QPushButton("Instellingen…"); ff_settings.clicked.connect(self.configure_ffprobe); ff_layout.addWidget(ff_settings); layout.addWidget(ff_box)
         stats = QGroupBox("Scanstatistieken"); stats_layout = QGridLayout(stats); self.total_label = self._stat_label("0"); self.video_label = self._stat_label("0"); self.audio_label = self._stat_label("0"); self.error_label = self._stat_label("0"); self.size_label = self._stat_label("0 B")
@@ -140,10 +140,7 @@ class MainWindow(QMainWindow):
             box = QWidget(); box_layout = QVBoxLayout(box); box_layout.setContentsMargins(4, 2, 4, 2); label = QLabel(caption); label.setObjectName("statCaption"); box_layout.addWidget(label); box_layout.addWidget(widget); stats_layout.addWidget(box, 0, col)
         layout.addWidget(stats)
         filter_box = QGroupBox("Filter resultaten"); filter_layout = QHBoxLayout(filter_box); self.search = QLineEdit(); self.search.setPlaceholderText("Zoeken op naam, pad, codec, resolutie…"); self.search.textChanged.connect(self.apply_filters); self.type_filter = QComboBox(); self.type_filter.addItems(["Alle", "Video", "Audio"]); self.type_filter.currentTextChanged.connect(self.apply_filters); self.status_filter = QComboBox(); self.status_filter.addItems(["Alle", "OK", "Fouten"]); self.status_filter.currentTextChanged.connect(self.apply_filters); clear = QPushButton("Filters wissen"); clear.clicked.connect(self.clear_filters); self.select_all_button = QPushButton("Alles selecteren"); self.select_all_button.clicked.connect(self.select_all_visible); self.delete_button = QPushButton("🗑  Naar Prullenbak"); self.delete_button.setObjectName("danger"); self.delete_button.clicked.connect(self.delete_selected)
-        self.play_selected_button = QPushButton("Geselecteerde video's afspelen")
-        self.play_selected_button.setObjectName("secondary")
-        self.play_selected_button.clicked.connect(self.play_selected_videos)
-        filter_layout.addWidget(self.search, 1); filter_layout.addWidget(QLabel("Type:")); filter_layout.addWidget(self.type_filter); filter_layout.addWidget(QLabel("Status:")); filter_layout.addWidget(self.status_filter); filter_layout.addWidget(clear); filter_layout.addWidget(self.select_all_button); filter_layout.addWidget(self.delete_button); filter_layout.addWidget(self.play_selected_button); layout.addWidget(filter_box)
+        filter_layout.addWidget(self.search, 1); filter_layout.addWidget(QLabel("Type:")); filter_layout.addWidget(self.type_filter); filter_layout.addWidget(QLabel("Status:")); filter_layout.addWidget(self.status_filter); filter_layout.addWidget(clear); filter_layout.addWidget(self.select_all_button); filter_layout.addWidget(self.delete_button); layout.addWidget(filter_box)
         self.progress = QProgressBar(); self.progress.setTextVisible(True); self.progress.setFormat("%v / %m"); layout.addWidget(self.progress); self.status = QLabel("Klaar om te scannen."); self.status.setObjectName("status"); layout.addWidget(self.status)
         self.table = QTableView(); self.table.setModel(self.proxy); self.table.setSortingEnabled(True); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True); self.table.doubleClicked.connect(self.open_selected); self.table.selectionModel().selectionChanged.connect(self._update_action_state)
         header = self.table.horizontalHeader(); header.setStretchLastSection(False); header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -172,7 +169,7 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: #353b45; } QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; } QPushButton#primary:hover { background: #3b70b6; } QPushButton#secondary { background: #3b313f; border-color: #66536b; font-weight: 600; } QPushButton#secondary:hover { background: #4b3d50; } QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; } QPushButton#danger:hover { background: #6a3036; } QPushButton:disabled { color: #666c75; background: #202329; }
             QProgressBar { background: #1e2127; border: 1px solid #353a43; border-radius: 5px; height: 18px; text-align: center; } QProgressBar::chunk { background: #477dcc; border-radius: 4px; }
             QHeaderView::section { background: #252a31; color: #cfd4dc; padding: 8px; border: 0; border-right: 1px solid #343941; } QTableView { gridline-color: #30343b; } QTableView::item { padding: 6px; } QTableView::item:selected { background: #304a70; }
-            QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { color: #ffffff; font-weight: bold; }
+            QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { font-weight: 700; }
         """)
     def open_duplicate_finder(self):
         folder = self.folder.text().strip(); self.duplicate_window = DuplicateFinderWindow()
@@ -189,8 +186,8 @@ class MainWindow(QMainWindow):
         return scanner
     def refresh_ffprobe_status(self):
         scanner = self._make_scanner()
-        if scanner.ffprobe: self.ffprobe_status.setText(chr(8226) + chr(32) + chr(70)+chr(70)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(103)+chr(101)+chr(118)+chr(111)+chr(110)+chr(100)+chr(101)+chr(110)); self.ffprobe_status.setStyleSheet(chr(34)+chr(99)+chr(111)+chr(108)+chr(111)+chr(114)+chr(58)+chr(32)+chr(35)+chr(54)+chr(53)+chr(99)+chr(52)+chr(55)+chr(97)+chr(59)+chr(32)+chr(102)+chr(111)+chr(110)+chr(116)+chr(45)+chr(119)+chr(101)+chr(105)+chr(103)+chr(104)+chr(116)+chr(58)+chr(32)+chr(55)+chr(48)+chr(48)+chr(59)+chr(34)); self.ffprobe_path.setText(scanner.ffprobe)
-        else: self.ffprobe_status.setText(chr(8226) + chr(32) + chr(70)+chr(70)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(110)+chr(105)+chr(101)+chr(116)+chr(32)+chr(103)+chr(101)+chr(118)+chr(111)+chr(110)+chr(100)+chr(101)+chr(110)); self.ffprobe_status.setStyleSheet(chr(34)+chr(99)+chr(111)+chr(108)+chr(111)+chr(114)+chr(58)+chr(32)+chr(35)+chr(101)+chr(50)+chr(54)+chr(100)+chr(54)+chr(100)+chr(59)+chr(32)+chr(102)+chr(111)+chr(110)+chr(116)+chr(45)+chr(119)+chr(101)+chr(105)+chr(103)+chr(104)+chr(116)+chr(58)+chr(32)+chr(55)+chr(48)+chr(48)+chr(59)+chr(34)); self.ffprobe_path.setText(chr(34)+chr(73)+chr(110)+chr(115)+chr(116)+chr(97)+chr(108)+chr(108)+chr(101)+chr(101)+chr(114)+chr(32)+chr(70)+chr(70)+chr(109)+chr(112)+chr(101)+chr(103)+chr(32)+chr(111)+chr(102)+chr(32)+chr(107)+chr(105)+chr(101)+chr(115)+chr(32)+chr(104)+chr(97)+chr(110)+chr(100)+chr(109)+chr(97)+chr(116)+chr(105)+chr(103)+chr(32)+chr(101)+chr(101)+chr(110)+chr(32)+chr(102)+chr(102)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(101)+chr(120)+chr(101)+chr(99)+chr(117)+chr(116)+chr(97)+chr(98)+chr(108)+chr(101)+chr(46)+chr(34))
+        if scanner.ffprobe: self.ffprobe_status.setText("● FFprobe gevonden"); self.ffprobe_status.setStyleSheet("color: #65c47a; font-weight: 700;"); self.ffprobe_path.setText(scanner.ffprobe)
+        else: self.ffprobe_status.setText("● FFprobe niet gevonden"); self.ffprobe_status.setStyleSheet("color: #e26d6d; font-weight: 700;"); self.ffprobe_path.setText("Installeer FFmpeg of kies handmatig een ffprobe executable.")
     def configure_ffprobe(self):
         dialog = FFprobeDialog(self._configured_ffprobe(), self)
         if dialog.exec() != QDialog.DialogCode.Accepted: return
@@ -226,47 +223,13 @@ class MainWindow(QMainWindow):
     def _selected_items(self) -> list[MediaResult]:
         items = []
         for proxy_index in self.table.selectionModel().selectedRows():
-            source_index = self.proxy.mapToSource(proxy_index); item = self.model.data(source_index, Qt.ItemDataRole.UserRole)
+            source_index = self.proxy.mapToSource(proxy_index); item = source_index.data(Qt.ItemDataRole.UserRole)
             if item: items.append(item)
         return items
     def _update_action_state(self, *args):
         enabled = bool(self._selected_items()) if hasattr(self, "table") else False
         if hasattr(self, "delete_button"): self.delete_button.setEnabled(enabled)
         if hasattr(self, "delete_action"): self.delete_action.setEnabled(enabled)
-
-    def play_selected_videos(self):
-        items = self._selected_items()
-        videos = [item for item in items if item.media_type == "Video"]
-
-        if not videos:
-            QMessageBox.information(
-                self,
-                "Video afspelen",
-                "Selecteer eerst ??n of meer video's."
-            )
-            return
-
-        if not hasattr(self, 'video_windows'):
-            self.video_windows = []
-
-        window = VideoPlayerWindow(
-            videos[0].path,
-            self,
-            playlist=[item.path for item in videos]
-        )
-
-        self.video_windows.append(window)
-
-        window.destroyed.connect(
-            lambda: self.video_windows.remove(window)
-            if window in self.video_windows
-            else None
-        )
-
-        window.show()
-        window.raise_()
-        window.activateWindow()
-
     def delete_selected(self):
         items = self._selected_items()
         if not items: return
@@ -327,4 +290,3 @@ def main():
     app = QApplication(sys.argv); app.setApplicationName("VideoAudioScanner"); window = MainWindow(); window.show(); sys.exit(app.exec())
 
 if __name__ == "__main__": main()
-

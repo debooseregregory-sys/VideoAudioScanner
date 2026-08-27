@@ -1,0 +1,1664 @@
+﻿from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+from PySide6.QtCore import QProcess, QThread, Signal, Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from scanner import VIDEO_EXTENSIONS
+
+
+def find_ffmpeg() -> str | None:
+    names = ["ffmpeg.exe", "ffmpeg"] if os.name == "nt" else ["ffmpeg"]
+
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    here = Path(__file__).resolve().parent
+
+    for candidate in (
+        here / "ffmpeg.exe",
+        here / "ffmpeg" / "bin" / "ffmpeg.exe",
+        here / "tools" / "ffmpeg.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+
+    return None
+
+
+def find_ffprobe() -> str | None:
+    names = ["ffprobe.exe", "ffprobe"] if os.name == "nt" else ["ffprobe"]
+
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    here = Path(__file__).resolve().parent
+
+    for candidate in (
+        here / "ffprobe.exe",
+        here / "ffmpeg" / "bin" / "ffprobe.exe",
+        here / "tools" / "ffprobe.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+
+    return None
+
+
+class HelpDialog(QDialog):
+    def __init__(self, title: str, text: str, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle(title)
+        self.resize(520, 300)
+
+        layout = QVBoxLayout(self)
+
+        heading = QLabel(title)
+        heading.setObjectName("helpTitle")
+        layout.addWidget(heading)
+
+        message = QLabel(text)
+        message.setWordWrap(True)
+        message.setObjectName("helpText")
+        layout.addWidget(message, 1)
+
+        button = QPushButton("OK")
+        button.clicked.connect(self.accept)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(button)
+        layout.addLayout(row)
+
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #101216;
+                color: #e8eaed;
+            }
+
+            QLabel#helpTitle {
+                color: #ffffff;
+                font-size: 20px;
+                font-weight: 800;
+            }
+
+            QLabel#helpText {
+                color: #c4c9d1;
+                font-size: 14px;
+                line-height: 150%;
+            }
+
+            QPushButton {
+                background: #315f9e;
+                border: 1px solid #4679bd;
+                border-radius: 6px;
+                padding: 8px 18px;
+                color: #ffffff;
+            }
+            """
+        )
+
+
+class ConvertWizard(QDialog):
+    finished = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Video Converter - Wizard")
+        self.resize(700, 560)
+
+        self._build_ui()
+        self._apply_theme()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+
+        title = QLabel("VIDEO CONVERTER WIZARD")
+        title.setObjectName("wizardTitle")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Je hoeft niets van codecs of CRF te kennen. "
+            "Vertel wat je met de video wilt bereiken en de wizard "
+            "kiest geschikte instellingen."
+        )
+        intro.setObjectName("wizardIntro")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        question = QLabel("Wat wil je bereiken?")
+        question.setObjectName("question")
+        layout.addWidget(question)
+
+        self.choice = QComboBox()
+
+        self.choice.addItem(
+            "Beste compatibiliteit",
+            "compatibility",
+        )
+
+        self.choice.addItem(
+            "Kleinere bestanden",
+            "smaller",
+        )
+
+        self.choice.addItem(
+            "Hoogste compressie",
+            "av1",
+        )
+
+        self.choice.addItem(
+            "Hoogste kwaliteit",
+            "quality",
+        )
+
+        self.choice.addItem(
+            "Alleen formaat veranderen",
+            "copy",
+        )
+
+        self.choice.addItem(
+            "Video kleiner maken",
+            "resolution",
+        )
+
+        layout.addWidget(self.choice)
+
+        self.explanation = QLabel()
+        self.explanation.setObjectName("explanation")
+        self.explanation.setWordWrap(True)
+        layout.addWidget(self.explanation)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setObjectName("separator")
+        layout.addWidget(separator)
+
+        destination_title = QLabel("Doelbestand")
+        destination_title.setObjectName("sectionTitle")
+        layout.addWidget(destination_title)
+
+        destination_text = QLabel(
+            "De wizard kiest standaard MP4 als doel. "
+            "Je kunt dit later nog aanpassen."
+        )
+        destination_text.setWordWrap(True)
+        destination_text.setObjectName("smallText")
+        layout.addWidget(destination_text)
+
+        self.container = QComboBox()
+        self.container.addItems(["mp4", "mkv", "webm"])
+
+        form = QFormLayout()
+        form.addRow("Formaat:", self.container)
+        layout.addLayout(form)
+
+        self.choice.currentIndexChanged.connect(
+            self.update_explanation
+        )
+
+        self.update_explanation()
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+
+        cancel = QPushButton("Annuleren")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+
+        apply_button = QPushButton("Instellingen gebruiken")
+        apply_button.setObjectName("primary")
+        apply_button.clicked.connect(self.apply_settings)
+        buttons.addWidget(apply_button)
+
+        layout.addLayout(buttons)
+
+    def update_explanation(self):
+        mode = self.choice.currentData()
+
+        explanations = {
+            "compatibility": (
+                "Aanbevolen voor algemeen gebruik. "
+                "De wizard gebruikt MP4, H.264-video en AAC-audio. "
+                "Dit werkt op de meeste computers, televisies en apparaten."
+            ),
+            "smaller": (
+                "De video wordt opnieuw gecodeerd met H.265/HEVC. "
+                "Dit levert meestal een kleiner bestand op dan H.264 "
+                "bij vergelijkbare beeldkwaliteit."
+            ),
+            "av1": (
+                "AV1 is gericht op zeer efficiënte compressie. "
+                "Bestanden kunnen aanzienlijk kleiner worden, maar "
+                "de conversie kan veel langer duren."
+            ),
+            "quality": (
+                "De nadruk ligt op beeldkwaliteit. "
+                "Er wordt weinig gecomprimeerd zodat de nieuwe video "
+                "zo dicht mogelijk bij het origineel blijft."
+            ),
+            "copy": (
+                "De bestaande video- en audiostreams worden gekopieerd. "
+                "Er vindt geen hercodering plaats en daardoor is er "
+                "geen kwaliteitsverlies. Niet iedere combinatie van "
+                "bron en doelcontainer is hiervoor geschikt."
+            ),
+            "resolution": (
+                "De beeldresolutie wordt verkleind. "
+                "Dit is vooral nuttig wanneer je video's voor een "
+                "telefoon, tablet of kleiner scherm wilt maken."
+            ),
+        }
+
+        self.explanation.setText(
+            explanations.get(mode, "")
+        )
+
+        if mode == "copy":
+            self.container.setCurrentText("mkv")
+
+        elif mode in ("compatibility", "smaller", "quality", "resolution"):
+            self.container.setCurrentText("mp4")
+
+        elif mode == "av1":
+            self.container.setCurrentText("webm")
+
+    def apply_settings(self):
+        mode = self.choice.currentData()
+
+        settings = {
+            "mode": mode,
+            "container": self.container.currentText(),
+        }
+
+        self.finished.emit(settings)
+        self.accept()
+
+    def _apply_theme(self):
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #101216;
+                color: #e8eaed;
+            }
+
+            QLabel#wizardTitle {
+                font-size: 28px;
+                font-weight: 900;
+                color: #ffffff;
+            }
+
+            QLabel#wizardIntro {
+                color: #aeb5c0;
+                font-size: 14px;
+            }
+
+            QLabel#question {
+                color: #ffffff;
+                font-size: 20px;
+                font-weight: 800;
+            }
+
+            QLabel#sectionTitle {
+                color: #ffffff;
+                font-size: 17px;
+                font-weight: 800;
+            }
+
+            QLabel#smallText {
+                color: #8f96a3;
+            }
+
+            QLabel#explanation {
+                background: #191c22;
+                border: 1px solid #303640;
+                border-radius: 8px;
+                padding: 16px;
+                color: #c4c9d1;
+                font-size: 14px;
+            }
+
+            QFrame#separator {
+                color: #303640;
+            }
+
+            QComboBox {
+                background: #1e2127;
+                border: 1px solid #353a43;
+                border-radius: 6px;
+                padding: 8px;
+                color: #ffffff;
+            }
+
+            QPushButton {
+                background: #292e36;
+                border: 1px solid #3c424c;
+                border-radius: 7px;
+                padding: 9px 15px;
+                color: #ffffff;
+            }
+
+            QPushButton:hover {
+                background: #353b45;
+            }
+
+            QPushButton#primary {
+                background: #315f9e;
+                border-color: #4679bd;
+            }
+            """
+        )
+
+
+class ConvertWorker(QThread):
+    progress = Signal(int, int, str)
+    finished_ok = Signal(int, int)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        files: list[str],
+        output_dir: str,
+        container: str,
+        video_codec: str,
+        quality: str,
+        resolution: str,
+        audio_codec: str,
+        overwrite: bool,
+    ):
+        super().__init__()
+
+        self.files = files
+        self.output_dir = output_dir
+        self.container = container
+        self.video_codec = video_codec
+        self.quality = quality
+        self.resolution = resolution
+        self.audio_codec = audio_codec
+        self.overwrite = overwrite
+
+        self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
+
+    def run(self):
+        ffmpeg = find_ffmpeg()
+
+        if not ffmpeg:
+            self.error.emit(
+                "FFmpeg is niet gevonden."
+            )
+            return
+
+        try:
+            os.makedirs(
+                self.output_dir,
+                exist_ok=True,
+            )
+        except OSError as exc:
+            self.error.emit(
+                f"De doelmap kan niet worden aangemaakt:\n{exc}"
+            )
+            return
+
+        success = 0
+        failed = 0
+        total = len(self.files)
+
+        for index, source in enumerate(self.files, 1):
+            if self.cancel_requested:
+                break
+
+            source_path = Path(source)
+
+            target = (
+                Path(self.output_dir)
+                / f"{source_path.stem}.{self.container}"
+            )
+
+            if target.resolve() == source_path.resolve():
+                target = (
+                    Path(self.output_dir)
+                    / f"{source_path.stem}_converted.{self.container}"
+                )
+
+            command = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source_path),
+            ]
+
+            if self.video_codec == "copy":
+                command += [
+                    "-c:v",
+                    "copy",
+                ]
+
+            else:
+                command += [
+                    "-c:v",
+                    self.video_codec,
+                ]
+
+                if self.video_codec == "libx264":
+                    command += [
+                        "-preset",
+                        "medium",
+                        "-crf",
+                        self.quality,
+                    ]
+
+                elif self.video_codec == "libx265":
+                    command += [
+                        "-preset",
+                        "medium",
+                        "-crf",
+                        self.quality,
+                    ]
+
+                elif self.video_codec == "libsvtav1":
+                    command += [
+                        "-preset",
+                        "6",
+                        "-crf",
+                        self.quality,
+                    ]
+
+            if self.resolution != "Origineel":
+                width, height = self.resolution.split("x")
+
+                command += [
+                    "-vf",
+                    f"scale={width}:{height}:"
+                    "force_original_aspect_ratio=decrease",
+                ]
+
+            if self.audio_codec == "copy":
+                command += [
+                    "-c:a",
+                    "copy",
+                ]
+
+            elif self.audio_codec == "none":
+                command += [
+                    "-an",
+                ]
+
+            else:
+                command += [
+                    "-c:a",
+                    self.audio_codec,
+                ]
+
+                if self.audio_codec == "aac":
+                    command += [
+                        "-b:a",
+                        "192k",
+                    ]
+
+                elif self.audio_codec == "libopus":
+                    command += [
+                        "-b:a",
+                        "160k",
+                    ]
+
+            if self.container == "mp4":
+                command += [
+                    "-movflags",
+                    "+faststart",
+                ]
+
+            command += [
+                "-y" if self.overwrite else "-n",
+                str(target),
+            ]
+
+            self.progress.emit(
+                index - 1,
+                total,
+                source_path.name,
+            )
+
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=None,
+                    creationflags=(
+                        subprocess.CREATE_NO_WINDOW
+                        if os.name == "nt"
+                        else 0
+                    ),
+                )
+
+                if (
+                    completed.returncode == 0
+                    and target.is_file()
+                ):
+                    success += 1
+                else:
+                    failed += 1
+
+            except (
+                OSError,
+                subprocess.SubprocessError,
+            ):
+                failed += 1
+
+            self.progress.emit(
+                index,
+                total,
+                source_path.name,
+            )
+
+        self.finished_ok.emit(
+            success,
+            failed,
+        )
+
+
+class VideoConverterWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle(
+            "VideoAudioScanner - Video Converter"
+        )
+        self.resize(1250, 820)
+
+        self.files: list[str] = []
+        self.worker: ConvertWorker | None = None
+
+        self._build_ui()
+        self._apply_theme()
+
+    def _build_ui(self):
+        root = QWidget()
+
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(
+            20,
+            18,
+            20,
+            18,
+        )
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+
+        title = QLabel("VIDEO CONVERTER")
+        title.setObjectName("title")
+        header.addWidget(title)
+
+        header.addStretch(1)
+
+        wizard = QPushButton("Wizard")
+        wizard.setObjectName("wizard")
+        wizard.setToolTip(
+            "Laat de wizard geschikte instellingen kiezen "
+            "op basis van wat je met de video wilt doen."
+        )
+        wizard.clicked.connect(
+            self.open_wizard
+        )
+        header.addWidget(wizard)
+
+        credit = QLabel("MADE BY KID ACID")
+        credit.setObjectName("credit")
+        header.addWidget(credit)
+
+        layout.addLayout(header)
+
+        info = QLabel(
+            "Converteer video's naar een ander formaat of maak "
+            "bestanden kleiner. De originele bestanden worden "
+            "niet gewijzigd."
+        )
+        info.setObjectName("subtitle")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        source = QFrame()
+        source.setObjectName("panel")
+
+        source_layout = QHBoxLayout(source)
+
+        self.source_label = QLabel(
+            "Geen video's geselecteerd"
+        )
+        self.source_label.setObjectName("path")
+
+        add_files = QPushButton(
+            "Video's toevoegen"
+        )
+        add_files.setToolTip(
+            "Voeg een of meerdere videobestanden toe."
+        )
+        add_files.clicked.connect(
+            self.add_files
+        )
+
+        add_folder = QPushButton(
+            "Map toevoegen"
+        )
+        add_folder.setToolTip(
+            "Voeg alle ondersteunde video's uit een map toe."
+        )
+        add_folder.clicked.connect(
+            self.add_folder
+        )
+
+        clear = QPushButton(
+            "Lijst wissen"
+        )
+        clear.setToolTip(
+            "Verwijder alle video's uit de conversielijst."
+        )
+        clear.clicked.connect(
+            self.clear_files
+        )
+
+        source_layout.addWidget(
+            self.source_label,
+            1,
+        )
+        source_layout.addWidget(
+            add_files
+        )
+        source_layout.addWidget(
+            add_folder
+        )
+        source_layout.addWidget(
+            clear
+        )
+
+        layout.addWidget(source)
+
+        options = QFrame()
+        options.setObjectName("panel")
+
+        form = QFormLayout(options)
+        form.setVerticalSpacing(9)
+
+        self.output = QLineEdit()
+        self.output.setPlaceholderText(
+            "Doelmap voor geconverteerde bestanden"
+        )
+
+        browse_output = QPushButton(
+            "Bladeren..."
+        )
+        browse_output.setToolTip(
+            "Kies waar de geconverteerde video's moeten worden opgeslagen."
+        )
+        browse_output.clicked.connect(
+            self.choose_output
+        )
+
+        output_row = QHBoxLayout()
+        output_row.addWidget(
+            self.output,
+            1,
+        )
+        output_row.addWidget(
+            browse_output
+        )
+
+        form.addRow(
+            "Doelmap:",
+            output_row,
+        )
+
+        self.container = QComboBox()
+        self.container.addItems(
+            [
+                "mp4",
+                "mkv",
+                "webm",
+            ]
+        )
+
+        form.addRow(
+            "Formaat:",
+            self.help_row(
+                self.container,
+                "Formaat",
+                "De container bepaalt hoe video en audio "
+                "in het uiteindelijke bestand worden verpakt. "
+                "MP4 is meestal de beste keuze voor compatibiliteit. "
+                "MKV is flexibel voor archivering. "
+                "WebM wordt vooral gebruikt voor webvideo.",
+            ),
+        )
+
+        self.video_codec = QComboBox()
+
+        self.video_codec.addItem(
+            "H.264 - compatibel",
+            "libx264",
+        )
+
+        self.video_codec.addItem(
+            "H.265 / HEVC - kleiner",
+            "libx265",
+        )
+
+        self.video_codec.addItem(
+            "AV1 - zeer efficient",
+            "libsvtav1",
+        )
+
+        self.video_codec.addItem(
+            "Video kopieren - geen hercodering",
+            "copy",
+        )
+
+        form.addRow(
+            "Video codec:",
+            self.help_row(
+                self.video_codec,
+                "Video codec",
+                "De codec bepaalt hoe het beeld wordt opgeslagen. "
+                "H.264 geeft brede compatibiliteit. "
+                "H.265 maakt vaak kleinere bestanden. "
+                "AV1 is zeer efficient maar kan veel langer duren. "
+                "Kopieren betekent dat het bestaande beeld niet opnieuw "
+                "wordt gecodeerd.",
+            ),
+        )
+
+        self.quality = QComboBox()
+
+        self.quality.addItems(
+            [
+                "18 - zeer hoog",
+                "20 - hoog",
+                "23 - standaard",
+                "26 - kleiner bestand",
+                "28 - sterk gecomprimeerd",
+            ]
+        )
+
+        self.quality.setCurrentIndex(2)
+
+        form.addRow(
+            "Kwaliteit:",
+            self.help_row(
+                self.quality,
+                "Kwaliteit / CRF",
+                "CRF bepaalt hoeveel de video wordt gecomprimeerd. "
+                "Een lager getal betekent doorgaans betere kwaliteit "
+                "en een groter bestand. Een hoger getal betekent "
+                "meer compressie en een kleiner bestand.",
+            ),
+        )
+
+        self.resolution = QComboBox()
+
+        self.resolution.addItems(
+            [
+                "Origineel",
+                "3840x2160",
+                "2560x1440",
+                "1920x1080",
+                "1280x720",
+                "854x480",
+            ]
+        )
+
+        form.addRow(
+            "Resolutie:",
+            self.help_row(
+                self.resolution,
+                "Resolutie",
+                "De resolutie bepaalt het aantal beeldpunten. "
+                "Origineel behoudt de bestaande resolutie. "
+                "Een lagere resolutie kan het bestand kleiner maken "
+                "en is handig voor telefoons of tablets.",
+            ),
+        )
+
+        self.audio_codec = QComboBox()
+
+        self.audio_codec.addItem(
+            "AAC",
+            "aac",
+        )
+
+        self.audio_codec.addItem(
+            "Opus",
+            "libopus",
+        )
+
+        self.audio_codec.addItem(
+            "Audio behouden",
+            "copy",
+        )
+
+        self.audio_codec.addItem(
+            "Geen audio",
+            "none",
+        )
+
+        form.addRow(
+            "Audio:",
+            self.help_row(
+                self.audio_codec,
+                "Audio",
+                "AAC is een goede algemene keuze en werkt breed. "
+                "Opus is efficient en geschikt voor moderne toepassingen. "
+                "Audio behouden kopieert de bestaande audiostream. "
+                "Geen audio verwijdert het geluid.",
+            ),
+        )
+
+        self.overwrite = QCheckBox(
+            "Bestaande doelbestanden overschrijven"
+        )
+
+        self.overwrite.setToolTip(
+            "Als dit uit staat, worden bestaande bestanden niet overschreven."
+        )
+
+        form.addRow(
+            "Bestanden:",
+            self.help_row(
+                self.overwrite,
+                "Overschrijven",
+                "Als deze optie aan staat, mag FFmpeg een bestaand "
+                "doelbestand vervangen. Standaard staat dit uit "
+                "om bestaande bestanden te beschermen.",
+            ),
+        )
+
+        layout.addWidget(options)
+
+        self.table = QTableWidget(
+            0,
+            3,
+        )
+
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Bestand",
+                "Pad",
+                "Status",
+            ]
+        )
+
+        self.table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+
+        self.table.horizontalHeader().setStretchLastSection(
+            True
+        )
+
+        self.table.setColumnWidth(
+            0,
+            320,
+        )
+
+        self.table.setColumnWidth(
+            1,
+            600,
+        )
+
+        layout.addWidget(
+            self.table,
+            1,
+        )
+
+        self.progress = QProgressBar()
+        self.progress.setFormat(
+            "%v / %m"
+        )
+
+        layout.addWidget(
+            self.progress
+        )
+
+        self.status = QLabel(
+            "Klaar om te converteren."
+        )
+        self.status.setObjectName(
+            "status"
+        )
+
+        layout.addWidget(
+            self.status
+        )
+
+        actions = QHBoxLayout()
+
+        self.start_button = QPushButton(
+            "Conversie starten"
+        )
+        self.start_button.setObjectName(
+            "primary"
+        )
+        self.start_button.setToolTip(
+            "Start de conversie met de gekozen instellingen."
+        )
+        self.start_button.clicked.connect(
+            self.start_conversion
+        )
+
+        self.cancel_button = QPushButton(
+            "Stoppen"
+        )
+        self.cancel_button.setToolTip(
+            "Stop na het huidige bestand."
+        )
+        self.cancel_button.setEnabled(
+            False
+        )
+        self.cancel_button.clicked.connect(
+            self.cancel_conversion
+        )
+
+        actions.addWidget(
+            self.start_button
+        )
+        actions.addWidget(
+            self.cancel_button
+        )
+
+        actions.addStretch(1)
+
+        close = QPushButton(
+            "Sluiten"
+        )
+        close.clicked.connect(
+            self.close
+        )
+
+        actions.addWidget(
+            close
+        )
+
+        layout.addLayout(
+            actions
+        )
+
+        self.setCentralWidget(
+            root
+        )
+
+    def help_row(
+        self,
+        widget,
+        title: str,
+        text: str,
+    ):
+        row = QWidget()
+
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
+        row_layout.setSpacing(6)
+
+        row_layout.addWidget(
+            widget,
+            1,
+        )
+
+        help_button = QPushButton("?")
+        help_button.setFixedSize(
+            30,
+            30,
+        )
+        help_button.setToolTip(
+            f"Uitleg over {title}"
+        )
+
+        help_button.clicked.connect(
+            lambda: HelpDialog(
+                title,
+                text,
+                self,
+            ).exec()
+        )
+
+        row_layout.addWidget(
+            help_button
+        )
+
+        return row
+
+    def open_wizard(self):
+        wizard = ConvertWizard(self)
+
+        wizard.finished.connect(
+            self.apply_wizard_settings
+        )
+
+        wizard.exec()
+
+    def apply_wizard_settings(
+        self,
+        settings: dict,
+    ):
+        mode = settings["mode"]
+        container = settings["container"]
+
+        self.container.setCurrentText(
+            container
+        )
+
+        if mode == "compatibility":
+            self.video_codec.setCurrentIndex(0)
+            self.quality.setCurrentText(
+                "20 - hoog"
+            )
+            self.resolution.setCurrentText(
+                "Origineel"
+            )
+            self.audio_codec.setCurrentIndex(0)
+
+        elif mode == "smaller":
+            self.video_codec.setCurrentIndex(1)
+            self.quality.setCurrentText(
+                "23 - standaard"
+            )
+            self.resolution.setCurrentText(
+                "Origineel"
+            )
+            self.audio_codec.setCurrentIndex(0)
+
+        elif mode == "av1":
+            self.video_codec.setCurrentIndex(2)
+            self.quality.setCurrentText(
+                "26 - kleiner bestand"
+            )
+            self.resolution.setCurrentText(
+                "Origineel"
+            )
+            self.audio_codec.setCurrentIndex(1)
+
+        elif mode == "quality":
+            self.video_codec.setCurrentIndex(0)
+            self.quality.setCurrentText(
+                "18 - zeer hoog"
+            )
+            self.resolution.setCurrentText(
+                "Origineel"
+            )
+            self.audio_codec.setCurrentIndex(0)
+
+        elif mode == "copy":
+            self.video_codec.setCurrentIndex(3)
+            self.quality.setCurrentText(
+                "23 - standaard"
+            )
+            self.resolution.setCurrentText(
+                "Origineel"
+            )
+            self.audio_codec.setCurrentIndex(2)
+
+        elif mode == "resolution":
+            self.video_codec.setCurrentIndex(0)
+            self.quality.setCurrentText(
+                "23 - standaard"
+            )
+            self.resolution.setCurrentText(
+                "1920x1080"
+            )
+            self.audio_codec.setCurrentIndex(0)
+
+        self.status.setText(
+            "Wizardinstellingen toegepast. "
+            "Controleer de doelmap en start daarna de conversie."
+        )
+
+    def _apply_theme(self):
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #15171b;
+                color: #e8eaed;
+                font-size: 13px;
+            }
+
+            QMainWindow {
+                background: #101216;
+            }
+
+            QLabel#title {
+                font-size: 28px;
+                font-weight: 900;
+                color: #ffffff;
+            }
+
+            QLabel#credit {
+                font-size: 17px;
+                font-weight: 800;
+                padding: 9px 14px;
+                background: #15181d;
+                border: 1px solid #3d434d;
+                border-radius: 8px;
+            }
+
+            QLabel#subtitle {
+                color: #929aa7;
+                padding-bottom: 4px;
+            }
+
+            QLabel#path {
+                color: #c8ccd3;
+                padding: 6px;
+            }
+
+            QLabel#status {
+                color: #aeb5c0;
+            }
+
+            QFrame#panel {
+                background: #191c22;
+                border: 1px solid #303640;
+                border-radius: 9px;
+            }
+
+            QLineEdit,
+            QComboBox {
+                background: #1e2127;
+                border: 1px solid #353a43;
+                border-radius: 6px;
+                padding: 7px;
+                color: #ffffff;
+            }
+
+            QComboBox QAbstractItemView {
+                background: #1e2127;
+                color: #ffffff;
+                selection-background-color: #315f9e;
+            }
+
+            QPushButton {
+                background: #292e36;
+                border: 1px solid #3c424c;
+                border-radius: 6px;
+                padding: 9px 14px;
+                font-weight: 600;
+                color: #ffffff;
+            }
+
+            QPushButton:hover {
+                background: #353b45;
+            }
+
+            QPushButton#primary {
+                background: #315f9e;
+                border-color: #4679bd;
+            }
+
+            QPushButton#wizard {
+                background: #315f9e;
+                border-color: #5686c4;
+                font-weight: 800;
+                padding: 10px 18px;
+            }
+
+            QPushButton#wizard:hover {
+                background: #3b70b8;
+            }
+
+            QCheckBox {
+                color: #cfd4dc;
+                spacing: 7px;
+            }
+
+            QTableWidget {
+                background: #1e2127;
+                border: 1px solid #353a43;
+                gridline-color: #30343c;
+            }
+
+            QTableWidget::item {
+                padding: 4px;
+            }
+
+            QHeaderView::section {
+                background: #252a31;
+                color: #cfd4dc;
+                padding: 8px;
+                border: 0;
+            }
+
+            QProgressBar {
+                background: #1e2127;
+                border: 1px solid #353a43;
+                border-radius: 5px;
+                height: 18px;
+                text-align: center;
+            }
+
+            QProgressBar::chunk {
+                background: #477dcc;
+                border-radius: 4px;
+            }
+            """
+        )
+
+    def add_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Kies video's",
+            "",
+            "Video bestanden (*.mp4 *.mkv *.avi *.mov *.m4v "
+            "*.webm *.ts *.mts *.m2ts *.wmv *.flv *.mpeg *.mpg);;"
+            "Alle bestanden (*)",
+        )
+
+        self._add_paths(
+            paths
+        )
+
+    def add_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Kies een videomap",
+        )
+
+        if not folder:
+            return
+
+        paths = [
+            str(path)
+            for path in Path(folder).rglob("*")
+            if (
+                path.is_file()
+                and path.suffix.lower()
+                in VIDEO_EXTENSIONS
+            )
+        ]
+
+        self._add_paths(
+            paths
+        )
+
+    def _add_paths(
+        self,
+        paths: list[str],
+    ):
+        existing = set(
+            self.files
+        )
+
+        for path in paths:
+            if path not in existing:
+                self.files.append(
+                    path
+                )
+                existing.add(
+                    path
+                )
+
+        self._refresh_table()
+
+    def clear_files(self):
+        self.files.clear()
+        self._refresh_table()
+
+    def _refresh_table(self):
+        self.table.setRowCount(
+            len(self.files)
+        )
+
+        for row, path in enumerate(
+            self.files
+        ):
+            self.table.setItem(
+                row,
+                0,
+                QTableWidgetItem(
+                    Path(path).name
+                ),
+            )
+
+            self.table.setItem(
+                row,
+                1,
+                QTableWidgetItem(
+                    path
+                ),
+            )
+
+            self.table.setItem(
+                row,
+                2,
+                QTableWidgetItem(
+                    "Wachten"
+                ),
+            )
+
+        if self.files:
+            self.source_label.setText(
+                f"{len(self.files)} video(s) geselecteerd"
+            )
+        else:
+            self.source_label.setText(
+                "Geen video's geselecteerd"
+            )
+
+    def choose_output(self):
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Kies doelmap",
+        )
+
+        if folder:
+            self.output.setText(
+                folder
+            )
+
+    def start_conversion(self):
+        if not self.files:
+            QMessageBox.information(
+                self,
+                "Converter",
+                "Voeg eerst een of meer video's toe.",
+            )
+            return
+
+        output = self.output.text().strip()
+
+        if not output:
+            QMessageBox.information(
+                self,
+                "Converter",
+                "Kies eerst een doelmap.",
+            )
+            return
+
+        if self.worker and self.worker.isRunning():
+            return
+
+        ffmpeg = find_ffmpeg()
+
+        if not ffmpeg:
+            QMessageBox.critical(
+                self,
+                "FFmpeg ontbreekt",
+                "FFmpeg is niet gevonden.",
+            )
+            return
+
+        self.progress.setRange(
+            0,
+            len(self.files),
+        )
+
+        self.progress.setValue(
+            0
+        )
+
+        self.start_button.setEnabled(
+            False
+        )
+
+        self.cancel_button.setEnabled(
+            True
+        )
+
+        self.status.setText(
+            "Conversie bezig..."
+        )
+
+        for row in range(
+            self.table.rowCount()
+        ):
+            self.table.item(
+                row,
+                2,
+            ).setText(
+                "Wachten"
+            )
+
+        quality = (
+            self.quality
+            .currentText()
+            .split(
+                " ",
+                1,
+            )[0]
+        )
+
+        self.worker = ConvertWorker(
+            self.files,
+            output,
+            self.container.currentText(),
+            self.video_codec.currentData(),
+            quality,
+            self.resolution.currentText(),
+            self.audio_codec.currentData(),
+            self.overwrite.isChecked(),
+        )
+
+        self.worker.progress.connect(
+            self.update_progress
+        )
+
+        self.worker.finished_ok.connect(
+            self.conversion_finished
+        )
+
+        self.worker.error.connect(
+            self.conversion_error
+        )
+
+        self.worker.start()
+
+    def update_progress(
+        self,
+        current,
+        total,
+        name,
+    ):
+        self.progress.setRange(
+            0,
+            max(total, 1),
+        )
+
+        self.progress.setValue(
+            current
+        )
+
+        self.status.setText(
+            f"Converteren: {name}"
+        )
+
+        for row in range(
+            self.table.rowCount()
+        ):
+            item = self.table.item(
+                row,
+                0,
+            )
+
+            if item and item.text() == name:
+                self.table.item(
+                    row,
+                    2,
+                ).setText(
+                    "Bezig..."
+                )
+
+                if current > 0:
+                    for previous in range(
+                        row
+                    ):
+                        previous_item = (
+                            self.table.item(
+                                previous,
+                                2,
+                            )
+                        )
+
+                        if (
+                            previous_item
+                            and previous_item.text()
+                            == "Bezig..."
+                        ):
+                            previous_item.setText(
+                                "Klaar"
+                            )
+
+                break
+
+    def conversion_finished(
+        self,
+        success,
+        failed,
+    ):
+        self.start_button.setEnabled(
+            True
+        )
+
+        self.cancel_button.setEnabled(
+            False
+        )
+
+        self.progress.setValue(
+            success + failed
+        )
+
+        self.status.setText(
+            f"Klaar - {success} geslaagd, "
+            f"{failed} mislukt."
+        )
+
+        for row in range(
+            self.table.rowCount()
+        ):
+            item = self.table.item(
+                row,
+                2,
+            )
+
+            if item and item.text() == "Bezig...":
+                item.setText(
+                    "Klaar"
+                    if failed == 0
+                    else "Controleer"
+                )
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Conversie",
+                f"Conversie voltooid. "
+                f"{success} geslaagd, "
+                f"{failed} mislukt.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Conversie",
+                f"Alle {success} video's "
+                f"zijn geconverteerd.",
+            )
+
+    def conversion_error(
+        self,
+        message,
+    ):
+        self.start_button.setEnabled(
+            True
+        )
+
+        self.cancel_button.setEnabled(
+            False
+        )
+
+        self.status.setText(
+            "Conversie mislukt."
+        )
+
+        QMessageBox.critical(
+            self,
+            "Video Converter",
+            message,
+        )
+
+    def cancel_conversion(self):
+        if self.worker:
+            self.worker.cancel()
+
+            self.status.setText(
+                "Stoppen na het huidige bestand..."
+            )
+
+            self.cancel_button.setEnabled(
+                False
+            )
+
+    def closeEvent(self, event):
+        if (
+            self.worker
+            and self.worker.isRunning()
+        ):
+            self.worker.cancel()
+            self.worker.wait(
+                1500
+            )
+
+        event.accept()
+
+
+if __name__ == "__main__":
+    app = QApplication([])
+
+    window = VideoConverterWindow()
+    window.show()
+
+    app.exec()
+

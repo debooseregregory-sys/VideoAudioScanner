@@ -37,7 +37,6 @@ class ModuleCard(QFrame):
     ):
         super().__init__(parent)
         self.setObjectName("moduleCard")
-        self.setMinimumHeight(250)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
@@ -756,5 +755,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
