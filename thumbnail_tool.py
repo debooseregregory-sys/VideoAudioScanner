@@ -6,7 +6,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal, QObject
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,11 +34,7 @@ VIDEO_FILTER = (
 
 
 class ThumbnailWorker:
-    """Background FFmpeg worker.
-
-    All FFmpeg work runs outside the Qt GUI thread. The worker communicates
-    through Qt signals and never touches widgets directly.
-    """
+    """Background FFmpeg worker."""
 
     def __init__(self, source, target, second, image_format, quality, width, mode, index=1, total=1, tasks=None):
         self.source = source
@@ -171,9 +167,6 @@ class ThumbnailWorker:
         signals.finished.emit("batch", not self.stop_event.is_set(), "", "", 0, total)
 
 
-from PySide6.QtCore import QObject
-
-
 class _WorkerSignals(QObject):
     progress = Signal(int, int, str, bool, str)
     finished = Signal(str, bool, str, str, int, int)
@@ -195,7 +188,7 @@ class ThumbnailThread(QThread):
 
 
 class ThumbnailToolWindow(QDialog):
-    """Full thumbnail generator used by the Video Suite.
+    """Thumbnail generator used by the Video Suite.
 
     The original video is never modified. Preview files are stored in the
     system temporary directory; final thumbnails are written to the chosen
@@ -371,24 +364,29 @@ class ThumbnailToolWindow(QDialog):
 
     def _apply_theme(self):
         self.setStyleSheet("""
-            QDialog { background:#101216; color:#e8eaed; }
-            QLabel#title { color:#fff; font-size:30px; font-weight:900; }
-            QLabel#subtitle { color:#8f96a3; font-size:14px; }
-            QLabel#count { color:#b9c8dc; background:#182235; border:1px solid #315f9e; border-radius:7px; padding:8px 12px; }
+            QDialog { background:#101216; color:#ffffff; }
+            QLabel { color:#ffffff; }
+            QLabel#title { color:#ffffff; font-size:30px; font-weight:900; }
+            QLabel#subtitle { color:#ffffff; font-size:14px; }
+            QLabel#count { color:#ffffff; background:#182235; border:1px solid #315f9e; border-radius:7px; padding:8px 12px; }
             QWidget#panel { background:#171a20; border:1px solid #303640; border-radius:10px; }
-            QLabel#panelTitle { color:#fff; font-size:17px; font-weight:800; }
-            QLabel#fileList { color:#9da5b2; background:#12151a; border:1px solid #282d35; border-radius:7px; padding:10px; }
-            QLabel#preview { color:#737c89; background:#0c0f13; border:1px dashed #3b424d; border-radius:7px; }
-            QLabel#previewName { color:#9da5b2; }
-            QLabel#status { color:#aeb5c0; }
-            QLineEdit,QComboBox,QSpinBox { background:#1e2127; border:1px solid #353a43; border-radius:6px; padding:7px; color:#e8eaed; }
-            QPushButton { background:#292e36; border:1px solid #3c424c; border-radius:7px; padding:9px 14px; color:#e8eaed; font-weight:600; }
+            QLabel#panelTitle { color:#ffffff; font-size:17px; font-weight:800; }
+            QLabel#fileList { color:#ffffff; background:#12151a; border:1px solid #282d35; border-radius:7px; padding:10px; }
+            QLabel#preview { color:#ffffff; background:#0c0f13; border:1px dashed #3b424d; border-radius:7px; }
+            QLabel#previewName { color:#ffffff; }
+            QLabel#status { color:#ffffff; }
+            QLineEdit,QComboBox,QSpinBox { background:#1e2127; border:1px solid #353a43; border-radius:6px; padding:7px; color:#ffffff; selection-color:#ffffff; selection-background-color:#315f9e; }
+            QComboBox QAbstractItemView { background:#1e2127; color:#ffffff; selection-background-color:#315f9e; selection-color:#ffffff; }
+            QPushButton { background:#292e36; border:1px solid #3c424c; border-radius:7px; padding:9px 14px; color:#ffffff; font-weight:600; }
             QPushButton:hover { background:#353b45; }
-            QPushButton#primary { background:#315f9e; border-color:#4679bd; color:#fff; }
+            QPushButton:disabled { color:#ffffff; }
+            QPushButton#primary { background:#315f9e; border-color:#4679bd; color:#ffffff; }
             QPushButton#primary:hover { background:#3b70b6; }
-            QPushButton#secondary { background:#26384f; border-color:#3d638e; color:#fff; }
-            QPushButton#cancel { background:#653636; border-color:#8b4a4a; color:#fff; }
-            QProgressBar { background:#171a20; border:1px solid #303640; border-radius:6px; text-align:center; color:#e8eaed; min-height:18px; }
+            QPushButton#secondary { background:#26384f; border-color:#3d638e; color:#ffffff; }
+            QPushButton#cancel { background:#653636; border-color:#8b4a4a; color:#ffffff; }
+            QProgressBar { background:#171a20; border:1px solid #303640; border-radius:6px; text-align:center; color:#ffffff; min-height:18px; }
+            QProgressBar::chunk { background:#315f9e; border-radius:5px; }
+            QToolTip { background:#1e2127; color:#ffffff; border:1px solid #4a515d; padding:5px; }
         """)
 
     def _format_changed(self):
@@ -399,12 +397,7 @@ class ThumbnailToolWindow(QDialog):
 
     def _set_busy(self, busy: bool):
         self._busy = busy
-        controls = [
-            self.preview_button,
-            self.generate_button,
-            self.close_button,
-            self.cancel_button,
-        ]
+        controls = [self.preview_button, self.generate_button, self.close_button, self.cancel_button]
         for control in controls:
             control.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
@@ -559,9 +552,7 @@ class ThumbnailToolWindow(QDialog):
                 if pixmap.isNull():
                     self.preview.clear()
                     self.preview.setText("Afbeelding kon niet worden geladen.")
-                    self.preview_name.setText(
-                        "FFmpeg maakte een bestand, maar Qt kon de afbeelding niet openen."
-                    )
+                    self.preview_name.setText("FFmpeg maakte een bestand, maar Qt kon de afbeelding niet openen.")
                     self.status.setText("Voorbeeld mislukt.")
                 else:
                     self._preview_pixmap = pixmap
@@ -587,10 +578,7 @@ class ThumbnailToolWindow(QDialog):
             worker = self._worker
             self._batch_stopped = worker.stop_event.is_set() if worker is not None else self._batch_stopped
             if self._batch_stopped:
-                self.status.setText(
-                    f"Gestopt: {self._batch_success:,} gelukt, "
-                    f"{len(self._batch_failed):,} mislukt."
-                )
+                self.status.setText(f"Gestopt: {self._batch_success:,} gelukt, {len(self._batch_failed):,} mislukt.")
                 self.progress.setFormat("Gestopt")
             elif not self._batch_failed:
                 self.status.setText(f"Klaar: {self._batch_success:,} thumbnail(s) gemaakt.")
@@ -598,14 +586,10 @@ class ThumbnailToolWindow(QDialog):
                 self.progress.setFormat(f"{self._batch_success:,} thumbnail(s) klaar")
             else:
                 self.status.setText(
-                    f"Klaar met fouten: {self._batch_success:,} gelukt, "
-                    f"{len(self._batch_failed):,} mislukt."
+                    f"Klaar met fouten: {self._batch_success:,} gelukt, {len(self._batch_failed):,} mislukt."
                 )
                 self.progress.setValue(100)
-                self.progress.setFormat(
-                    f"{self._batch_success:,} gelukt / {len(self._batch_failed):,} mislukt"
-                )
-
+                self.progress.setFormat(f"{self._batch_success:,} gelukt / {len(self._batch_failed):,} mislukt")
             self._show_batch_result()
 
     def _thread_finished(self):
@@ -621,27 +605,18 @@ class ThumbnailToolWindow(QDialog):
             QMessageBox.information(
                 self,
                 "Thumbnail Tool",
-                f"De verwerking is gestopt.\n\n"
-                f"Gelukt: {self._batch_success:,}\n"
-                f"Mislukt: {len(self._batch_failed):,}",
+                f"De verwerking is gestopt.\n\nGelukt: {self._batch_success:,}\nMislukt: {len(self._batch_failed):,}",
             )
             return
-
         if not self._batch_failed:
             output = self.output.text().strip() or str(Path(self.selected_files[0]).parent)
             QMessageBox.information(
                 self,
                 "Thumbnail Tool",
-                f"Klaar.\n\n{self._batch_success:,} thumbnail(s) gemaakt.\n\n"
-                f"Doelmap:\n{output}",
+                f"Klaar.\n\n{self._batch_success:,} thumbnail(s) gemaakt.\n\nDoelmap:\n{output}",
             )
             return
-
-        lines = [
-            f"Gelukt: {self._batch_success:,}",
-            f"Mislukt: {len(self._batch_failed):,}",
-            "",
-        ]
+        lines = [f"Gelukt: {self._batch_success:,}", f"Mislukt: {len(self._batch_failed):,}", ""]
         for name, error in self._batch_failed[:8]:
             lines.extend([name, error, ""])
         if len(self._batch_failed) > 8:
@@ -655,19 +630,11 @@ class ThumbnailToolWindow(QDialog):
             QMessageBox.warning(self, "Thumbnail Tool", "Kies eerst één of meerdere video's.")
             return
 
-        output = (
-            Path(self.output.text().strip())
-            if self.output.text().strip()
-            else Path(self.selected_files[0]).parent
-        )
+        output = Path(self.output.text().strip()) if self.output.text().strip() else Path(self.selected_files[0]).parent
         try:
             output.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.critical(
-                self,
-                "Thumbnail Tool",
-                f"Doelmap kon niet worden aangemaakt.\n\n{exc}",
-            )
+            QMessageBox.critical(self, "Thumbnail Tool", f"Doelmap kon niet worden aangemaakt.\n\n{exc}")
             return
 
         suffix = ".jpg" if self.format.currentData() == "jpg" else ".png"
@@ -684,7 +651,6 @@ class ThumbnailToolWindow(QDialog):
         self.progress.setValue(0)
         self.progress.setFormat(f"0/{len(tasks)}")
         self.status.setText(f"Starten: {len(tasks):,} thumbnail(s)…")
-
         self._start_worker(
             ThumbnailWorker(
                 source="",
@@ -720,22 +686,14 @@ class ThumbnailToolWindow(QDialog):
 
     def reject(self):
         if self._busy:
-            QMessageBox.information(
-                self,
-                "Thumbnail Tool",
-                "Stop eerst de huidige verwerking voordat je het venster sluit.",
-            )
+            QMessageBox.information(self, "Thumbnail Tool", "Stop eerst de huidige verwerking voordat je het venster sluit.")
             return
         super().reject()
 
     def closeEvent(self, event):
         if self._busy:
             event.ignore()
-            QMessageBox.information(
-                self,
-                "Thumbnail Tool",
-                "Stop eerst de huidige verwerking voordat je het venster sluit.",
-            )
+            QMessageBox.information(self, "Thumbnail Tool", "Stop eerst de huidige verwerking voordat je het venster sluit.")
             return
         event.accept()
 
