@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -29,11 +32,9 @@ VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
     ".m4v", ".mpeg", ".mpg", ".ts", ".mts", ".m2ts",
 }
-
 AUDIO_EXTENSIONS = {
     ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".opus", ".wma",
 }
-
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff",
 }
@@ -63,9 +64,10 @@ class StorageAnalyzerWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("VideoAudioScanner - Storage Analyzer")
-        self.resize(1350, 900)
+        self.resize(1450, 920)
         self.files: list[tuple[str, int, str]] = []
         self.current_folder = ""
+        self.preview_path = ""
         self._build_ui()
         self._apply_theme()
 
@@ -80,8 +82,8 @@ class StorageAnalyzerWindow(QMainWindow):
         layout.addWidget(title)
 
         intro = QLabel(
-            "Analyseer je opslag, ontdek grote bestanden en zie meteen welke bestandstypes "
-            "de meeste ruimte gebruiken. De scan werkt recursief door alle onderliggende mappen."
+            "Analyseer je opslag, ontdek grote bestanden en bekijk meteen een preview "
+            "van het geselecteerde bestand. De scan werkt recursief door alle onderliggende mappen."
         )
         intro.setObjectName("intro")
         intro.setWordWrap(True)
@@ -93,7 +95,6 @@ class StorageAnalyzerWindow(QMainWindow):
         info_layout.setContentsMargins(16, 12, 16, 12)
         self.folder_label = QLabel("Nog geen map gekozen")
         self.folder_label.setObjectName("folder")
-        self.folder_label.setToolTip("De geselecteerde scanlocatie")
         info_layout.addWidget(self.folder_label, 1)
         self.total_label = QLabel("0 bestanden • 0 B")
         self.total_label.setObjectName("total")
@@ -102,7 +103,6 @@ class StorageAnalyzerWindow(QMainWindow):
 
         stats = QGridLayout()
         stats.setHorizontalSpacing(10)
-        stats.setVerticalSpacing(10)
         self.stat_files = self._stat_card("BESTANDEN", "0")
         self.stat_size = self._stat_card("TOTALE GROOTTE", "0 B")
         self.stat_largest = self._stat_card("GROOTSTE BESTAND", "0 B")
@@ -117,9 +117,9 @@ class StorageAnalyzerWindow(QMainWindow):
         type_panel.setObjectName("typePanel")
         type_layout = QVBoxLayout(type_panel)
         type_layout.setContentsMargins(14, 12, 14, 12)
-        type_title = QLabel("OPSLAG PER BESTANDSTYPE")
-        type_title.setObjectName("sectionTitle")
-        type_layout.addWidget(type_title)
+        section = QLabel("OPSLAG PER BESTANDSTYPE")
+        section.setObjectName("sectionTitle")
+        type_layout.addWidget(section)
         self.type_bars: dict[str, tuple[QProgressBar, QLabel]] = {}
         for kind in ("Video", "Audio", "Afbeelding", "Andere"):
             row = QHBoxLayout()
@@ -131,7 +131,7 @@ class StorageAnalyzerWindow(QMainWindow):
             bar.setTextVisible(False)
             value = QLabel("0 B • 0%")
             value.setObjectName("barValue")
-            value.setFixedWidth(125)
+            value.setFixedWidth(130)
             row.addWidget(name)
             row.addWidget(bar, 1)
             row.addWidget(value)
@@ -141,9 +141,9 @@ class StorageAnalyzerWindow(QMainWindow):
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-        choose_button = QPushButton("Map kiezen")
-        choose_button.clicked.connect(self.choose_folder)
-        controls.addWidget(choose_button)
+        choose = QPushButton("Map kiezen")
+        choose.clicked.connect(self.choose_folder)
+        controls.addWidget(choose)
         self.scan_button = QPushButton("Scan starten")
         self.scan_button.setObjectName("primary")
         self.scan_button.setEnabled(False)
@@ -180,6 +180,9 @@ class StorageAnalyzerWindow(QMainWindow):
         actions.addWidget(self.delete_button)
         layout.addLayout(actions)
 
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Bestand", "Type", "Extensie", "Grootte", "Pad"])
@@ -189,6 +192,7 @@ class StorageAnalyzerWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self._update_action_state)
+        self.table.itemSelectionChanged.connect(self.update_preview)
         self.table.cellDoubleClicked.connect(lambda row, _: self.open_path(self._path_at_row(row)))
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
@@ -196,7 +200,40 @@ class StorageAnalyzerWindow(QMainWindow):
         header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, header.ResizeMode.ResizeToContents)
-        layout.addWidget(self.table, 1)
+        splitter.addWidget(self.table)
+
+        preview = QFrame()
+        preview.setObjectName("previewPanel")
+        preview.setMinimumWidth(360)
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(16, 16, 16, 16)
+        preview_layout.setSpacing(10)
+
+        preview_title = QLabel("BESTAND PREVIEW")
+        preview_title.setObjectName("sectionTitle")
+        preview_layout.addWidget(preview_title)
+
+        self.preview_image = QLabel("Selecteer een bestand")
+        self.preview_image.setObjectName("previewImage")
+        self.preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_image.setMinimumHeight(220)
+        self.preview_image.setWordWrap(True)
+        preview_layout.addWidget(self.preview_image, 1)
+
+        self.preview_name = QLabel("Geen bestand geselecteerd")
+        self.preview_name.setObjectName("previewName")
+        self.preview_name.setWordWrap(True)
+        preview_layout.addWidget(self.preview_name)
+
+        self.preview_info = QLabel("")
+        self.preview_info.setObjectName("previewInfo")
+        self.preview_info.setWordWrap(True)
+        preview_layout.addWidget(self.preview_info)
+
+        splitter.addWidget(preview)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
 
         self.status = QLabel("Klaar. Kies een map om te beginnen.")
         self.status.setObjectName("status")
@@ -239,6 +276,7 @@ class StorageAnalyzerWindow(QMainWindow):
         self.files.clear()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
+        self._clear_preview()
         self._update_stats()
         self.status.setText("Analyseren…")
         self.scan_button.setEnabled(False)
@@ -265,10 +303,7 @@ class StorageAnalyzerWindow(QMainWindow):
         self._update_stats()
         self._refresh_table()
         self.scan_button.setEnabled(True)
-        self.status.setText(
-            f"Analyse klaar: {len(self.files):,} bestanden gevonden."
-            .replace(",", ".")
-        )
+        self.status.setText(f"Analyse klaar: {len(self.files):,} bestanden gevonden.".replace(",", "."))
 
     def _refresh_table(self):
         text = self.filter_edit.text().casefold().strip()
@@ -279,7 +314,7 @@ class StorageAnalyzerWindow(QMainWindow):
         self.table.setRowCount(0)
         for path, size, kind in self.files:
             suffix = Path(path).suffix.lower() or "(geen)"
-            if text and all(part not in path.casefold() for part in (text,)) and text not in suffix.casefold():
+            if text and text not in path.casefold() and text not in suffix.casefold():
                 continue
             if selected_type != "Alle types" and kind != selected_type:
                 continue
@@ -311,7 +346,6 @@ class StorageAnalyzerWindow(QMainWindow):
         self.stat_largest.value_label.setText(format_size(largest))
         self.stat_videos.value_label.setText(f"{videos:,}".replace(",", "."))
         self.total_label.setText(f"{len(self.files):,} bestanden • {format_size(total_size)}".replace(",", "."))
-
         totals: dict[str, int] = defaultdict(int)
         for _, size, kind in self.files:
             totals[kind] += size
@@ -322,12 +356,7 @@ class StorageAnalyzerWindow(QMainWindow):
             value.setText(f"{format_size(amount)} • {percent}%")
 
     def _selected_paths(self) -> list[str]:
-        result = []
-        for index in self.table.selectionModel().selectedRows():
-            path = self._path_at_row(index.row())
-            if path:
-                result.append(path)
-        return result
+        return [self._path_at_row(index.row()) for index in self.table.selectionModel().selectedRows() if self._path_at_row(index.row())]
 
     def _path_at_row(self, row: int) -> str:
         item = self.table.item(row, 4)
@@ -338,6 +367,81 @@ class StorageAnalyzerWindow(QMainWindow):
         self.delete_button.setEnabled(selected)
         self.open_button.setEnabled(selected)
         self.folder_button.setEnabled(selected)
+
+    def update_preview(self):
+        paths = self._selected_paths()
+        if not paths:
+            self._clear_preview()
+            return
+        path = paths[0]
+        self.preview_path = path
+        size = 0
+        kind = ""
+        for candidate, candidate_size, candidate_kind in self.files:
+            if candidate == path:
+                size, kind = candidate_size, candidate_kind
+                break
+        self.preview_name.setText(Path(path).name)
+        self.preview_info.setText(f"{kind} • {format_size(size)}\n{path}")
+        self.preview_image.setPixmap(QPixmap())
+        self.preview_image.setText("Preview laden…")
+        QApplication.processEvents()
+
+        if kind == "Afbeelding":
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                self._set_preview_pixmap(pixmap)
+            else:
+                self.preview_image.setText("Afbeelding kan niet worden geladen.")
+        elif kind == "Video":
+            pixmap = self._video_thumbnail(path)
+            if pixmap is not None and not pixmap.isNull():
+                self._set_preview_pixmap(pixmap)
+            else:
+                self.preview_image.setText("Geen preview beschikbaar.\nDubbelklik om de video te openen.")
+        elif kind == "Audio":
+            self.preview_image.setText("🎵\n\nAudio-bestand\n\nDubbelklik om te openen.")
+        else:
+            self.preview_image.setText("📄\n\nBestand geselecteerd\n\nDubbelklik om te openen.")
+
+    def _set_preview_pixmap(self, pixmap: QPixmap):
+        self.preview_image.setText("")
+        self.preview_image.setPixmap(pixmap.scaled(
+            self.preview_image.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+
+    def _video_thumbnail(self, path: str):
+        commands = [
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "5", "-i", path,
+             "-frames:v", "1", "-vf", "scale=640:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
+             "-frames:v", "1", "-vf", "scale=640:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+        ]
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode == 0 and result.stdout:
+                    pixmap = QPixmap()
+                    if pixmap.loadFromData(result.stdout, "JPG"):
+                        return pixmap
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return None
+
+    def _clear_preview(self):
+        self.preview_path = ""
+        self.preview_image.setPixmap(QPixmap())
+        self.preview_image.setText("Selecteer een bestand")
+        self.preview_name.setText("Geen bestand geselecteerd")
+        self.preview_info.setText("")
 
     def open_path(self, path: str):
         if not path or not Path(path).is_file():
@@ -354,32 +458,26 @@ class StorageAnalyzerWindow(QMainWindow):
 
     def open_selected_folder(self):
         paths = self._selected_paths()
-        if not paths:
-            return
-        try:
-            os.startfile(str(Path(paths[0]).parent))
-        except OSError as exc:
-            QMessageBox.warning(self, "Map openen", str(exc))
+        if paths:
+            try:
+                os.startfile(str(Path(paths[0]).parent))
+            except OSError as exc:
+                QMessageBox.warning(self, "Map openen", str(exc))
 
     def delete_selected(self):
         paths = self._selected_paths()
         if not paths:
             return
         answer = QMessageBox.question(
-            self,
-            "Naar Prullenbak",
+            self, "Naar Prullenbak",
             f"Wil je {len(paths)} geselecteerd(e) bestand(en) naar de Windows Prullenbak verplaatsen?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        if os.name != "nt":
-            QMessageBox.warning(self, "Prullenbak", "De Windows Prullenbak is alleen beschikbaar op Windows.")
+        if answer != QMessageBox.StandardButton.Yes or os.name != "nt":
             return
 
         from ctypes import wintypes
-
         class SHFILEOPSTRUCTW(ctypes.Structure):
             _fields_ = [
                 ("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
@@ -405,6 +503,7 @@ class StorageAnalyzerWindow(QMainWindow):
         self.files = [item for item in self.files if item[0] not in moved_set]
         self._refresh_table()
         self._update_stats()
+        self._clear_preview()
         self.status.setText(f"{len(moved)} bestand(en) naar de Prullenbak verplaatst.")
         if failed:
             QMessageBox.warning(self, "Prullenbak", f"{len(moved)} verplaatst. {len(failed)} konden niet worden verplaatst.")
@@ -415,12 +514,14 @@ class StorageAnalyzerWindow(QMainWindow):
             QMainWindow { background: #0d0f13; }
             QLabel#title { font-size: 30px; font-weight: 900; color: #ffffff; }
             QLabel#intro { color: #9da5b1; font-size: 14px; }
-            QFrame#infoPanel, QFrame#statCard, QFrame#typePanel { background: #191c22; border: 1px solid #303640; border-radius: 10px; }
+            QFrame#infoPanel, QFrame#statCard, QFrame#typePanel, QFrame#previewPanel { background: #191c22; border: 1px solid #303640; border-radius: 10px; }
             QLabel#folder { color: #d9dde3; }
             QLabel#total { color: #ffffff; font-weight: 700; }
             QLabel#statCaption, QLabel#sectionTitle { color: #7f8793; font-size: 11px; font-weight: 800; }
             QLabel#statValue { color: #ffffff; font-size: 20px; font-weight: 800; }
-            QLabel#barValue { color: #aeb5c0; }
+            QLabel#barValue, QLabel#previewInfo { color: #aeb5c0; }
+            QLabel#previewName { color: #ffffff; font-size: 16px; font-weight: 800; }
+            QLabel#previewImage { background: #0d0f13; border: 1px solid #303640; border-radius: 8px; color: #7f8793; font-size: 15px; padding: 10px; }
             QLabel#status { color: #aeb5c0; padding: 3px; }
             QLineEdit, QComboBox, QTableWidget { background: #1e2127; border: 1px solid #353a43; border-radius: 6px; }
             QLineEdit { padding: 9px; }
