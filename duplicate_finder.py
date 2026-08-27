@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import ctypes
 import hashlib
@@ -392,7 +392,7 @@ class DuplicateGroupDialog(QWidget):
         controls = QHBoxLayout()
         refresh = QPushButton("↻ Vernieuwen")
         refresh.clicked.connect(self.refresh)
-        close = QPushButton("? Terug naar resultaten")
+        close = QPushButton("← Terug naar resultaten")
         close.clicked.connect(self.finder.show_results_view)
         controls.addWidget(refresh)
         controls.addStretch(1)
@@ -410,6 +410,21 @@ class DuplicateGroupDialog(QWidget):
             QLabel#keep { color: #8fd19e; font-weight: 800; }
             QLabel#delete { color: #e58b91; font-weight: 800; }
             QLabel#groupDetails { color: #d5dae1; padding: 5px; }
+            QFrame#videoCompareCard {
+                background: #15181d;
+                border: 1px solid #343a44;
+                border-radius: 8px;
+            }
+            QLabel#compareName {
+                color: #ffffff;
+                font-size: 14px;
+                padding: 3px;
+            }
+            QLabel#videoThumbnail {
+                background: #090a0c;
+                border: 1px solid #3c424c;
+                border-radius: 6px;
+            }
             QLabel#videoThumbnail {
                 background: #090a0c;
                 border: 1px solid #3c424c;
@@ -430,13 +445,19 @@ class DuplicateGroupDialog(QWidget):
 
     def refresh(self):
         self._clear_cards()
+
         rows = list(self.finder.rows or [])
-        ffmpeg = find_ffmpeg()
         groups: dict[int, list[DuplicateCandidate]] = {}
+
         for row in rows:
             groups.setdefault(row.group, []).append(row)
 
-        recommended_size = sum(row.info.size for row in rows if row.recommended_delete)
+        recommended_size = sum(
+            row.info.size
+            for row in rows
+            if row.recommended_delete
+        )
+
         self.summary.setText(
             f"{len(groups)} groepen  •  {len(rows)} bestanden  •  "
             f"{recommended_size / (1024 ** 3):.2f} GB aanbevolen ruimtewinst"
@@ -445,44 +466,121 @@ class DuplicateGroupDialog(QWidget):
         if not rows:
             empty = QFrame()
             empty.setObjectName("groupCard")
+
             empty_layout = QVBoxLayout(empty)
-            message = QLabel("Er zijn nog geen duplicaten om te tonen.\n\nKies een map en start eerst een duplicatenscan.")
+
+            message = QLabel(
+                "Er zijn nog geen duplicaten om te tonen.\\n\\n"
+                "Kies een map en start eerst een duplicatenscan."
+            )
             message.setWordWrap(True)
-            message.setStyleSheet("font-size: 16px; color: #aeb5c0; padding: 35px;")
+            message.setStyleSheet(
+                "font-size: 16px; color: #aeb5c0; padding: 35px;"
+            )
+
             empty_layout.addWidget(message)
             self.content_layout.addWidget(empty)
             self.content_layout.addStretch(1)
             return
 
+        ffmpeg = find_ffmpeg()
+
         for group_no in sorted(groups):
-            members = sorted(groups[group_no], key=lambda row: (row.recommended_delete, -quality_score(row.info), row.info.name.casefold()))
+            members = sorted(
+                groups[group_no],
+                key=lambda row: (
+                    row.recommended_delete,
+                    -quality_score(row.info),
+                    row.info.name.casefold(),
+                ),
+            )
+
             card = QFrame()
             card.setObjectName("groupCard")
+
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
-            card_layout.setSpacing(8)
+            card_layout.setContentsMargins(14, 12, 14, 14)
+            card_layout.setSpacing(10)
 
             header = QHBoxLayout()
-            group_label = QLabel(f"DUPLICAATGROEP {group_no:03d}")
+
+            group_label = QLabel(
+                f"DUPLICAATGROEP {group_no:03d}"
+            )
             group_label.setObjectName("groupNumber")
-            exact = all(member.info.video_hash for member in members)
-            kind = QLabel("◆ EXACT DUPLICAAT" if exact else "◈ VISUELE MATCH")
+
+            exact = all(
+                member.info.video_hash
+                for member in members
+            )
+
+            kind = QLabel(
+                "◆ EXACT DUPLICAAT"
+                if exact
+                else "◇ VISUELE MATCH"
+            )
             kind.setObjectName("groupKind")
+
             header.addWidget(group_label)
             header.addStretch(1)
             header.addWidget(kind)
+
             card_layout.addLayout(header)
+
+            # Iedere duplicaatgroep wordt een horizontale
+            # visuele vergelijking.
+            comparison = QHBoxLayout()
+            comparison.setSpacing(12)
 
             for member in members:
                 info = member.info
-                row_layout = QHBoxLayout()
-                row_layout.setSpacing(12)
+
+                item = QFrame()
+                item.setObjectName(
+                    "videoCompareCard"
+                )
+
+                item_layout = QVBoxLayout(item)
+                item_layout.setContentsMargins(
+                    10, 10, 10, 10
+                )
+                item_layout.setSpacing(7)
+
+                # Selectie blijft gekoppeld aan de bestaande
+                # tabelselectie en dus aan de bestaande
+                # Prullenbakfunctionaliteit.
+                select_row = QHBoxLayout()
+
+                select = QCheckBox(
+                    "Selecteren voor Prullenbak"
+                )
+                select.setChecked(
+                    self.finder.is_path_checked(
+                        info.path
+                    )
+                )
+                select.toggled.connect(
+                    lambda checked,
+                    path=info.path:
+                    self.finder.set_path_checked(
+                        path,
+                        checked
+                    )
+                )
+
+                select_row.addWidget(select)
+                select_row.addStretch(1)
+
+                item_layout.addLayout(select_row)
 
                 thumbnail = QLabel()
-                thumbnail.setFixedSize(320, 180)
-                thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                thumbnail.setObjectName("videoThumbnail")
-                thumbnail.setToolTip("Videoframe uit deze video")
+                thumbnail.setObjectName(
+                    "videoThumbnail"
+                )
+                thumbnail.setFixedSize(360, 203)
+                thumbnail.setAlignment(
+                    Qt.AlignmentFlag.AlignCenter
+                )
 
                 pixmap = create_video_thumbnail(
                     ffmpeg,
@@ -491,72 +589,100 @@ class DuplicateGroupDialog(QWidget):
                 )
 
                 if not pixmap.isNull():
-                    thumbnail.setPixmap(pixmap)
+                    thumbnail.setPixmap(
+                        pixmap.scaled(
+                            360,
+                            203,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
                 else:
-                    thumbnail.setText("GEEN\nVOORBEELD")
+                    thumbnail.setText(
+                        "Geen thumbnail beschikbaar"
+                    )
 
-                select = QCheckBox()
-                select.setChecked(
-                    self.finder.is_path_checked(info.path)
-                )
-                select.setToolTip(
-                    "Selecteer deze video voor de bestaande "
-                    "Prullenbakfunctie"
-                )
-                select.setFixedWidth(28)
-                select.toggled.connect(
-                    lambda checked, path=info.path:
-                    self.finder.set_path_checked(path, checked)
-                )
+                item_layout.addWidget(thumbnail)
 
                 status = QLabel(
-                    "? BEWAREN"
+                    "★ BEWAREN"
                     if not member.recommended_delete
-                    else "? VERWIJDEREN"
+                    else "● VERWIJDEREN"
                 )
                 status.setObjectName(
                     "keep"
                     if not member.recommended_delete
                     else "delete"
                 )
-                status.setMinimumWidth(135)
+                status.setAlignment(
+                    Qt.AlignmentFlag.AlignCenter
+                )
+
+                item_layout.addWidget(status)
+
+                name = QLabel(
+                    f"<b>{info.name}</b>"
+                )
+                name.setWordWrap(True)
+                name.setObjectName(
+                    "compareName"
+                )
+                item_layout.addWidget(name)
 
                 details = QLabel(
-                    f"<b>{info.name}</b><br>"
-                    f"{info.resolution}  ?  {info.bitrate_text}  ?  "
-                    f"{info.duration_text}  ?  "
-                    f"{info.video_codec}/{info.audio_codec}  ?  "
-                    f"{info.fps} FPS  ?  "
+                    f"{info.resolution}  •  "
+                    f"{info.bitrate_text}  •  "
+                    f"{info.duration_text}<br>"
+                    f"{info.video_codec} / "
+                    f"{info.audio_codec}  •  "
+                    f"{info.fps} FPS<br>"
                     f"{info.size / (1024 ** 3):.2f} GB<br>"
-                    f"Match: {member.similarity}%  ?  "
-                    f"{member.reason}<br>"
-                    f"<span style='color:#8f96a3'>{info.path}</span>"
+                    f"Match: {member.similarity}%<br>"
+                    f"<span style='color:#8f96a3'>"
+                    f"{member.reason}"
+                    f"</span>"
                 )
+
                 details.setWordWrap(True)
-                details.setTextInteractionFlags(
+                details.setObjectName(
+                    "groupDetails"
+                )
+
+                item_layout.addWidget(details)
+
+                path_label = QLabel(info.path)
+                path_label.setWordWrap(True)
+                path_label.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
-                details.setObjectName("groupDetails")
+                path_label.setStyleSheet(
+                    "color:#737b88; font-size:11px;"
+                )
+                item_layout.addWidget(path_label)
 
-                view = QPushButton("? Bekijk")
+                view = QPushButton("▶ Bekijk")
                 view.setToolTip(
-                    "Open deze video in de bestaande VideoPreviewDialog"
+                    "Open deze video in de bestaande "
+                    "VideoPreviewDialog"
                 )
                 view.clicked.connect(
-                    lambda _checked=False, path=info.path:
+                    lambda _checked=False,
+                    path=info.path:
                     self.finder.preview_path(path)
                 )
 
-                row_layout.addWidget(select)
-                row_layout.addWidget(thumbnail)
-                row_layout.addWidget(status)
-                row_layout.addWidget(details, 1)
-                row_layout.addWidget(view)
-                card_layout.addLayout(row_layout)
+                item_layout.addWidget(view)
 
+                comparison.addWidget(
+                    item,
+                    1
+                )
+
+            card_layout.addLayout(comparison)
             self.content_layout.addWidget(card)
 
         self.content_layout.addStretch(1)
+
 
 class DuplicateFinderWindow(QMainWindow):
     def __init__(self):
@@ -624,7 +750,7 @@ class DuplicateFinderWindow(QMainWindow):
         actions = QHBoxLayout()
         preview = QPushButton("▶ Video bekijken")
         preview.clicked.connect(self.preview_selected)
-        self.group_button = QPushButton("▦ Groepsweergave — duplicaten vergelijken")
+        self.group_button = QPushButton("◆ Groepsweergave — duplicaten vergelijken")
         self.group_button.setObjectName("groupViewButton")
         self.group_button.setToolTip("Bekijk de gevonden duplicaten overzichtelijk per groep, met de beste versie bovenaan.")
         self.group_button.clicked.connect(self.show_duplicate_groups)
@@ -632,7 +758,7 @@ class DuplicateFinderWindow(QMainWindow):
         self.select_bad.clicked.connect(self.select_bad_versions)
         clear = QPushButton("Alles uitvinken")
         clear.clicked.connect(self.clear_checks)
-        self.delete_button = QPushButton("🗑 Geselecteerde naar Prullenbak")
+        self.delete_button = QPushButton("🗑️ Geselecteerde naar Prullenbak")
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self.delete_selected)
         actions.addWidget(preview)
