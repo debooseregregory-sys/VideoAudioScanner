@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QGridLayout, QH
 from duplicate_finder import DuplicateFinderWindow
 from main import MainWindow as ScannerWindow
 from quality_analyzer import QualityAnalyzerWindow
+from video_converter import VideoConverterWindow
 from video_player import VideoPlayerWindow
 
 
@@ -48,6 +49,7 @@ class VideoSuiteWindow(QMainWindow):
         self.scanner_window = None
         self.duplicate_window = None
         self.quality_window = None
+        self.converter_window = None
         self.player_windows = []
         self._build_ui()
         self._apply_theme()
@@ -88,6 +90,7 @@ class VideoSuiteWindow(QMainWindow):
             ("♻", "DUPLICATEN", "Vind exacte en visuele duplicaten en vergelijk de kwaliteit.", "Duplicaten zoeken", self.open_duplicates, True),
             ("🎬", "VIDEO PLAYER", "Open één of meerdere video's in de ingebouwde speler.", "Video openen", self.open_player, True),
             ("📊", "QUALITY ANALYZER", "Vergelijk resolutie, bitrate, codec, FPS, audio en bestandsgrootte met een duidelijke kwaliteitsscore.", "Quality Analyzer openen", self.open_quality, True),
+            ("🛠", "VIDEO CONVERTER", "Converteer video's naar MP4, MKV of WebM met H.264, H.265, AV1 of zonder hercodering.", "Converter openen", self.open_converter, True),
             ("💾", "STORAGE ANALYZER", "Ontdek de grootste bestanden en waar je opslagruimte naartoe gaat.", "Binnenkort", None, False),
             ("📚", "VIDEO LIBRARY", "Bouw een overzichtelijke bibliotheek van je videocollectie.", "Binnenkort", None, False),
             ("🖼", "THUMBNAIL TOOL", "Maak en exporteer thumbnails van geselecteerde video's.", "Binnenkort", None, False),
@@ -151,6 +154,9 @@ class VideoSuiteWindow(QMainWindow):
 
     def open_quality(self):
         self._show_window("quality_window", lambda: QualityAnalyzerWindow(self))
+
+    def open_converter(self):
+        self._show_window("converter_window", lambda: VideoConverterWindow(self))
 
     def open_player(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Kies video's", "", "Video's (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.mpeg *.mpg *.ts *.mts *.m2ts);;Alle bestanden (*)")
