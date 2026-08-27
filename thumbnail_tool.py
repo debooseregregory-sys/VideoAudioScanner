@@ -3,14 +3,26 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from video_tools import VIDEO_EXTENSIONS, find_ffmpeg
@@ -21,11 +33,182 @@ VIDEO_FILTER = (
 )
 
 
-class ThumbnailToolWindow(QDialog):
-    """Thumbnail generator used by the Video Suite.
+class ThumbnailWorker:
+    """Background FFmpeg worker.
 
-    The source video is never modified. Preview files are created only in the
-    system temporary directory; final images are written to the destination.
+    All FFmpeg work runs outside the Qt GUI thread. The worker communicates
+    through Qt signals and never touches widgets directly.
+    """
+
+    def __init__(self, source, target, second, image_format, quality, width, mode, index=1, total=1, tasks=None):
+        self.source = source
+        self.target = target
+        self.second = second
+        self.image_format = image_format
+        self.quality = quality
+        self.width = width
+        self.mode = mode
+        self.index = index
+        self.total = total
+        self.tasks = tasks or []
+        self.stop_event = threading.Event()
+        self.process: subprocess.Popen | None = None
+
+    def request_stop(self):
+        self.stop_event.set()
+        if self.process is not None:
+            try:
+                self.process.terminate()
+            except OSError:
+                pass
+
+    def _creationflags(self) -> int:
+        return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+    def _command(self, source: str, target: str) -> list[str]:
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("FFmpeg kon niet worden gevonden.")
+
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            str(self.second),
+            "-i",
+            source,
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+        ]
+
+        if self.width > 0:
+            command += ["-vf", f"scale={self.width}:-2"]
+
+        if self.image_format == "jpg":
+            command += ["-q:v", str(self.quality)]
+        else:
+            command += ["-compression_level", "6"]
+
+        command += ["-y", target]
+        return command
+
+    def _run_one(self, source: str, target: str) -> tuple[bool, str]:
+        if self.stop_event.is_set():
+            return False, "Gestopt door gebruiker."
+
+        try:
+            command = self._command(source, target)
+        except RuntimeError as exc:
+            return False, str(exc)
+
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=self._creationflags(),
+            )
+        except OSError as exc:
+            self.process = None
+            return False, str(exc)
+
+        stderr_text = ""
+        try:
+            while True:
+                if self.stop_event.is_set():
+                    try:
+                        self.process.terminate()
+                    except OSError:
+                        pass
+                try:
+                    _, stderr_text = self.process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            process = self.process
+            self.process = None
+
+        if self.stop_event.is_set():
+            try:
+                Path(target).unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False, "Gestopt door gebruiker."
+
+        if process is None or process.returncode != 0:
+            return False, (stderr_text or "").strip() or "FFmpeg gaf een onbekende fout."
+
+        try:
+            valid = Path(target).is_file() and Path(target).stat().st_size > 0
+        except OSError:
+            valid = False
+
+        return (True, "") if valid else (False, "FFmpeg heeft geen geldige afbeelding aangemaakt.")
+
+    def run(self, signals):
+        if self.mode == "preview":
+            ok, error = self._run_one(self.source, self.target)
+            signals.finished.emit("preview", ok, self.target, error, 1, 1)
+            return
+
+        total = len(self.tasks)
+        for index, (source, target) in enumerate(self.tasks, 1):
+            if self.stop_event.is_set():
+                break
+            ok, error = self._run_one(source, target)
+            signals.progress.emit(index, total, Path(source).name, ok, error)
+            if self.stop_event.is_set():
+                break
+
+        signals.finished.emit("batch", not self.stop_event.is_set(), "", "", 0, total)
+
+
+class WorkerSignals:
+    progress = None
+    finished = None
+
+
+class ThumbnailWorkerSignals:
+    """Signal container created as a QObject-like helper by the QThread owner."""
+
+
+from PySide6.QtCore import QObject
+
+
+class _WorkerSignals(QObject):
+    progress = Signal(int, int, str, bool, str)
+    finished = Signal(str, bool, str, str, int, int)
+
+
+class ThumbnailThread(QThread):
+    progress = Signal(int, int, str, bool, str)
+    finished = Signal(str, bool, str, str, int, int)
+
+    def __init__(self, worker: ThumbnailWorker, parent=None):
+        super().__init__(parent)
+        self.worker = worker
+
+    def run(self):
+        signals = _WorkerSignals()
+        signals.progress.connect(self.progress.emit)
+        signals.finished.connect(self.finished.emit)
+        self.worker.run(signals)
+
+
+class ThumbnailToolWindow(QDialog):
+    """Full thumbnail generator used by the Video Suite.
+
+    The original video is never modified. Preview files are stored in the
+    system temporary directory; final thumbnails are written to the chosen
+    destination. FFmpeg processing runs in a background thread.
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -34,6 +217,12 @@ class ThumbnailToolWindow(QDialog):
         self.resize(1040, 740)
         self.selected_files: list[str] = []
         self._preview_pixmap: QPixmap | None = None
+        self._thread: ThumbnailThread | None = None
+        self._worker: ThumbnailWorker | None = None
+        self._busy = False
+        self._batch_success = 0
+        self._batch_failed: list[tuple[str, str]] = []
+        self._batch_stopped = False
         self._build_ui()
         self._apply_theme()
 
@@ -41,12 +230,16 @@ class ThumbnailToolWindow(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 22, 24, 22)
         root.setSpacing(14)
+
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("THUMBNAIL TOOL")
         title.setObjectName("title")
         title_box.addWidget(title)
-        subtitle = QLabel("Maak één of meerdere thumbnails uit video's. Het originele videobestand blijft volledig onaangetast.")
+        subtitle = QLabel(
+            "Maak één of meerdere thumbnails uit video's. Het originele "
+            "videobestand blijft volledig onaangetast."
+        )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         title_box.addWidget(subtitle)
@@ -94,28 +287,33 @@ class ThumbnailToolWindow(QDialog):
         form.setContentsMargins(16, 14, 16, 14)
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(11)
+
         self.second = QSpinBox()
         self.second.setRange(0, 86400)
         self.second.setValue(5)
         self.second.setSuffix(" sec")
         self.second.setToolTip("Het moment in seconden waarvan de thumbnail wordt genomen.")
         form.addRow("Moment:", self.second)
+
         self.format = QComboBox()
         self.format.addItem("JPG - compact", "jpg")
         self.format.addItem("PNG - maximale kwaliteit", "png")
         self.format.currentIndexChanged.connect(self._format_changed)
         form.addRow("Afbeelding:", self.format)
+
         self.quality = QSpinBox()
         self.quality.setRange(1, 31)
         self.quality.setValue(2)
         self.quality.setToolTip("JPG: 1 is hoogste kwaliteit, 31 is laagste kwaliteit.")
         form.addRow("JPG kwaliteit:", self.quality)
+
         self.width = QSpinBox()
         self.width.setRange(0, 7680)
         self.width.setValue(0)
         self.width.setSuffix(" px")
         self.width.setToolTip("0 = originele videobreedte behouden.")
         form.addRow("Breedte:", self.width)
+
         output_row = QHBoxLayout()
         self.output = QLineEdit()
         self.output.setPlaceholderText("Doelmap voor thumbnails")
@@ -124,6 +322,7 @@ class ThumbnailToolWindow(QDialog):
         browse.clicked.connect(self.choose_output)
         output_row.addWidget(browse)
         form.addRow("Doelmap:", output_row)
+
         left.addWidget(settings)
         left.addStretch(1)
         content.addLayout(left, 1)
@@ -132,6 +331,7 @@ class ThumbnailToolWindow(QDialog):
         preview_panel.setObjectName("panel")
         preview_layout = QVBoxLayout(preview_panel)
         preview_layout.setContentsMargins(16, 14, 16, 14)
+        preview_layout.setSpacing(10)
         preview_title = QLabel("2. Voorbeeld")
         preview_title.setObjectName("panelTitle")
         preview_layout.addWidget(preview_title)
@@ -144,10 +344,10 @@ class ThumbnailToolWindow(QDialog):
         self.preview_name.setObjectName("previewName")
         self.preview_name.setWordWrap(True)
         preview_layout.addWidget(self.preview_name)
-        preview_button = QPushButton("Voorbeeld maken")
-        preview_button.setObjectName("secondary")
-        preview_button.clicked.connect(self.make_preview)
-        preview_layout.addWidget(preview_button)
+        self.preview_button = QPushButton("Voorbeeld maken")
+        self.preview_button.setObjectName("secondary")
+        self.preview_button.clicked.connect(self.make_preview)
+        preview_layout.addWidget(self.preview_button)
         content.addWidget(preview_panel, 1)
         root.addLayout(content, 1)
 
@@ -156,17 +356,26 @@ class ThumbnailToolWindow(QDialog):
         self.progress.setValue(0)
         self.progress.setFormat("Klaar")
         root.addWidget(self.progress)
+
         bottom = QHBoxLayout()
         self.status = QLabel("Klaar.")
         self.status.setObjectName("status")
         bottom.addWidget(self.status, 1)
-        close = QPushButton("Sluiten")
-        close.clicked.connect(self.reject)
-        bottom.addWidget(close)
-        generate = QPushButton("Thumbnails maken")
-        generate.setObjectName("primary")
-        generate.clicked.connect(self.generate_thumbnails)
-        bottom.addWidget(generate)
+
+        self.close_button = QPushButton("Sluiten")
+        self.close_button.clicked.connect(self.reject)
+        bottom.addWidget(self.close_button)
+
+        self.cancel_button = QPushButton("Stoppen")
+        self.cancel_button.setObjectName("cancel")
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_operation)
+        bottom.addWidget(self.cancel_button)
+
+        self.generate_button = QPushButton("Thumbnails maken")
+        self.generate_button.setObjectName("primary")
+        self.generate_button.clicked.connect(self.generate_thumbnails)
+        bottom.addWidget(self.generate_button)
         root.addLayout(bottom)
 
     def _apply_theme(self):
@@ -187,30 +396,48 @@ class ThumbnailToolWindow(QDialog):
             QPushButton#primary { background:#315f9e; border-color:#4679bd; color:#fff; }
             QPushButton#primary:hover { background:#3b70b6; }
             QPushButton#secondary { background:#26384f; border-color:#3d638e; color:#fff; }
+            QPushButton#cancel { background:#653636; border-color:#8b4a4a; color:#fff; }
             QProgressBar { background:#171a20; border:1px solid #303640; border-radius:6px; text-align:center; color:#e8eaed; min-height:18px; }
         """)
-
-    @staticmethod
-    def _creationflags() -> int:
-        return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
     def _format_changed(self):
         is_jpg = self.format.currentData() == "jpg"
         self.quality.setEnabled(is_jpg)
-        if self.selected_files:
+        if self.selected_files and not self._busy:
             self.status.setText("Instellingen gewijzigd. Klik op ‘Voorbeeld maken’.")
 
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        controls = [
+            self.preview_button,
+            self.generate_button,
+            self.close_button,
+            self.cancel_button,
+        ]
+        for control in controls:
+            control.setEnabled(not busy)
+        self.cancel_button.setEnabled(busy)
+        self.cancel_button.setVisible(busy)
+
     def choose_files(self):
+        if self._busy:
+            return
         paths, _ = QFileDialog.getOpenFileNames(self, "Kies video's", "", VIDEO_FILTER)
         if paths:
             self._set_files(paths)
 
     def choose_folder(self):
+        if self._busy:
+            return
         folder = QFileDialog.getExistingDirectory(self, "Kies videomap")
         if not folder:
             return
         try:
-            paths = [str(p) for p in sorted(Path(folder).iterdir()) if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS]
+            paths = [
+                str(p)
+                for p in sorted(Path(folder).iterdir())
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+            ]
         except OSError as exc:
             QMessageBox.critical(self, "Thumbnail Tool", f"De videomap kon niet worden gelezen.\n\n{exc}")
             return
@@ -251,6 +478,8 @@ class ThumbnailToolWindow(QDialog):
         self.file_list.setText("\n".join(lines))
 
     def clear_selection(self):
+        if self._busy:
+            return
         self.selected_files.clear()
         self._refresh_file_list()
         self.preview.clear()
@@ -262,40 +491,30 @@ class ThumbnailToolWindow(QDialog):
         self.status.setText("Selectie gewist.")
 
     def choose_output(self):
+        if self._busy:
+            return
         folder = QFileDialog.getExistingDirectory(self, "Kies doelmap")
         if folder:
             self.output.setText(folder)
 
-    def _run_ffmpeg(self, source: str, target: str) -> tuple[bool, str]:
-        ffmpeg = find_ffmpeg()
-        if not ffmpeg:
-            return False, "FFmpeg kon niet worden gevonden."
-        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", source, "-ss", str(self.second.value()), "-map", "0:v:0", "-frames:v", "1"]
-        if self.width.value() > 0:
-            command += ["-vf", f"scale={self.width.value()}:-2"]
-        if self.format.currentData() == "jpg":
-            command += ["-q:v", str(self.quality.value())]
-        else:
-            command += ["-compression_level", "6"]
-        command += ["-y", target]
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=self._creationflags())
-        except OSError as exc:
-            return False, str(exc)
-        if result.returncode != 0:
-            return False, result.stderr.strip() or "FFmpeg gaf een onbekende fout."
-        try:
-            valid = Path(target).is_file() and Path(target).stat().st_size > 0
-        except OSError:
-            valid = False
-        return (True, "") if valid else (False, "FFmpeg heeft geen geldige afbeelding aangemaakt.")
+    def _unique_target(self, folder: Path, stem: str, suffix: str, reserved: set[Path] | None = None) -> Path:
+        reserved = reserved or set()
+        target = folder / f"{stem}_thumbnail{suffix}"
+        index = 2
+        while target.exists() or target in reserved:
+            target = folder / f"{stem}_thumbnail_{index}{suffix}"
+            index += 1
+        return target
 
     def make_preview(self):
+        if self._busy:
+            return
         if not self.selected_files:
             self.preview.clear()
             self.preview.setText("Kies eerst minstens één video.")
             self.preview_name.clear()
             return
+
         source = self.selected_files[0]
         suffix = ".jpg" if self.format.currentData() == "jpg" else ".png"
         temp_dir = Path(tempfile.gettempdir()) / "VideoAudioScanner"
@@ -305,88 +524,224 @@ class ThumbnailToolWindow(QDialog):
             self.preview.setText("Voorbeeld kon niet worden voorbereid.")
             self.preview_name.setText(str(exc))
             return
-        target = temp_dir / f"thumbnail_preview{suffix}"
+
+        target = temp_dir / f"thumbnail_preview_{os.getpid()}{suffix}"
         self.status.setText(f"Voorbeeld maken: {Path(source).name}")
+        self.progress.setValue(0)
         self.progress.setFormat("Voorbeeld maken…")
-        QApplication.processEvents()
-        ok, error = self._run_ffmpeg(source, str(target))
-        if not ok:
-            self.preview.clear()
-            self.preview.setText("Voorbeeld kon niet worden gemaakt.")
-            self.preview_name.setText(error)
-            self.status.setText("Voorbeeld mislukt.")
-            self.progress.setFormat("Voorbeeld mislukt")
+        self._start_worker(
+            ThumbnailWorker(
+                source=source,
+                target=str(target),
+                second=self.second.value(),
+                image_format=self.format.currentData(),
+                quality=self.quality.value(),
+                width=self.width.value(),
+                mode="preview",
+            )
+        )
+
+    def _start_worker(self, worker: ThumbnailWorker):
+        self._worker = worker
+        self._thread = ThumbnailThread(worker, self)
+        self._thread.progress.connect(self._worker_progress)
+        self._thread.finished.connect(self._worker_finished)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._set_busy(True)
+        self._thread.start()
+
+    def _worker_progress(self, index, total, name, ok, error):
+        if total:
+            self.progress.setValue(int(index * 100 / total))
+        self.progress.setFormat(f"{index}/{total} • {name}")
+        if ok:
+            self._batch_success += 1
+            self.status.setText(f"Thumbnail {index}/{total} klaar: {name}")
+        else:
+            self._batch_failed.append((name, error))
+            self.status.setText(f"Thumbnail {index}/{total} mislukt: {name}")
+
+    def _worker_finished(self, mode, ok, target, error, _index, total):
+        if mode == "preview":
+            if ok:
+                pixmap = QPixmap(target)
+                if pixmap.isNull():
+                    self.preview.clear()
+                    self.preview.setText("Afbeelding kon niet worden geladen.")
+                    self.preview_name.setText(
+                        "FFmpeg maakte een bestand, maar Qt kon de afbeelding niet openen."
+                    )
+                    self.status.setText("Voorbeeld mislukt.")
+                else:
+                    self._preview_pixmap = pixmap
+                    self._show_preview_pixmap()
+                    source = self.selected_files[0]
+                    self.preview_name.setText(
+                        f"Voorbeeld: {Path(source).name} • {self.second.value()} sec • "
+                        f"{pixmap.width()}×{pixmap.height()} px"
+                    )
+                    self.status.setText(
+                        "Voorbeeld klaar. Pas het moment aan en maak opnieuw een voorbeeld "
+                        "voor een ander frame."
+                    )
+                    self.progress.setValue(100)
+                    self.progress.setFormat("Voorbeeld klaar")
+            else:
+                self.preview.clear()
+                self.preview.setText("Voorbeeld kon niet worden gemaakt.")
+                self.preview_name.setText(error)
+                self.status.setText("Voorbeeld mislukt.")
+                self.progress.setFormat("Voorbeeld mislukt")
+        else:
+            self._batch_stopped = self._worker.stop_event.is_set()
+            if self._batch_stopped:
+                self.status.setText(
+                    f"Gestopt: {self._batch_success:,} gelukt, "
+                    f"{len(self._batch_failed):,} mislukt."
+                )
+                self.progress.setFormat("Gestopt")
+            elif not self._batch_failed:
+                self.status.setText(f"Klaar: {self._batch_success:,} thumbnail(s) gemaakt.")
+                self.progress.setValue(100)
+                self.progress.setFormat(f"{self._batch_success:,} thumbnail(s) klaar")
+            else:
+                self.status.setText(
+                    f"Klaar met fouten: {self._batch_success:,} gelukt, "
+                    f"{len(self._batch_failed):,} mislukt."
+                )
+                self.progress.setValue(100)
+                self.progress.setFormat(
+                    f"{self._batch_success:,} gelukt / {len(self._batch_failed):,} mislukt"
+                )
+
+            self._show_batch_result()
+
+        self._set_busy(False)
+        self._thread = None
+        self._worker = None
+
+    def _show_batch_result(self):
+        if self._batch_stopped:
+            QMessageBox.information(
+                self,
+                "Thumbnail Tool",
+                f"De verwerking is gestopt.\n\n"
+                f"Gelukt: {self._batch_success:,}\n"
+                f"Mislukt: {len(self._batch_failed):,}",
+            )
             return
-        pixmap = QPixmap(str(target))
-        if pixmap.isNull():
-            self.preview.clear()
-            self.preview.setText("Afbeelding kon niet worden geladen.")
-            self.preview_name.setText("FFmpeg maakte een bestand, maar Qt kon de afbeelding niet openen.")
+
+        if not self._batch_failed:
+            output = self.output.text().strip() or str(Path(self.selected_files[0]).parent)
+            QMessageBox.information(
+                self,
+                "Thumbnail Tool",
+                f"Klaar.\n\n{self._batch_success:,} thumbnail(s) gemaakt.\n\n"
+                f"Doelmap:\n{output}",
+            )
             return
-        self._preview_pixmap = pixmap
-        self._show_preview_pixmap()
-        self.preview_name.setText(f"Voorbeeld: {Path(source).name} • {self.second.value()} sec • {pixmap.width()}×{pixmap.height()} px")
-        self.status.setText("Voorbeeld klaar. Pas het moment aan en maak opnieuw een voorbeeld voor een ander frame.")
-        self.progress.setValue(100)
-        self.progress.setFormat("Voorbeeld klaar")
+
+        lines = [
+            f"Gelukt: {self._batch_success:,}",
+            f"Mislukt: {len(self._batch_failed):,}",
+            "",
+        ]
+        for name, error in self._batch_failed[:8]:
+            lines.extend([name, error, ""])
+        if len(self._batch_failed) > 8:
+            lines.append(f"… en nog {len(self._batch_failed) - 8:,} fouten.")
+        QMessageBox.warning(self, "Thumbnail Tool", "\n".join(lines))
+
+    def generate_thumbnails(self):
+        if self._busy:
+            return
+        if not self.selected_files:
+            QMessageBox.warning(self, "Thumbnail Tool", "Kies eerst één of meerdere video's.")
+            return
+
+        output = (
+            Path(self.output.text().strip())
+            if self.output.text().strip()
+            else Path(self.selected_files[0]).parent
+        )
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Thumbnail Tool",
+                f"Doelmap kon niet worden aangemaakt.\n\n{exc}",
+            )
+            return
+
+        suffix = ".jpg" if self.format.currentData() == "jpg" else ".png"
+        reserved: set[Path] = set()
+        tasks: list[tuple[str, str]] = []
+        for source in self.selected_files:
+            target = self._unique_target(output, Path(source).stem, suffix, reserved)
+            reserved.add(target)
+            tasks.append((source, str(target)))
+
+        self._batch_success = 0
+        self._batch_failed = []
+        self._batch_stopped = False
+        self.progress.setValue(0)
+        self.progress.setFormat(f"0/{len(tasks)}")
+        self.status.setText(f"Starten: {len(tasks):,} thumbnail(s)…")
+
+        self._start_worker(
+            ThumbnailWorker(
+                source="",
+                target="",
+                second=self.second.value(),
+                image_format=self.format.currentData(),
+                quality=self.quality.value(),
+                width=self.width.value(),
+                mode="batch",
+                tasks=tasks,
+            )
+        )
+
+    def cancel_operation(self):
+        if self._busy and self._worker is not None:
+            self.status.setText("Stoppen… huidige FFmpeg-bewerking wordt beëindigd.")
+            self.cancel_button.setEnabled(False)
+            self._worker.request_stop()
 
     def _show_preview_pixmap(self):
         if self._preview_pixmap is not None:
-            self.preview.setPixmap(self._preview_pixmap.scaled(self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.preview.setPixmap(
+                self._preview_pixmap.scaled(
+                    self.preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._show_preview_pixmap()
 
-    @staticmethod
-    def _unique_target(folder: Path, stem: str, suffix: str) -> Path:
-        target = folder / f"{stem}_thumbnail{suffix}"
-        index = 2
-        while target.exists():
-            target = folder / f"{stem}_thumbnail_{index}{suffix}"
-            index += 1
-        return target
+    def reject(self):
+        if self._busy:
+            QMessageBox.information(
+                self,
+                "Thumbnail Tool",
+                "Stop eerst de huidige verwerking voordat je het venster sluit.",
+            )
+            return
+        super().reject()
 
-    def generate_thumbnails(self):
-        if not self.selected_files:
-            QMessageBox.warning(self, "Thumbnail Tool", "Kies eerst één of meerdere video's.")
+    def closeEvent(self, event):
+        if self._busy:
+            event.ignore()
+            QMessageBox.information(
+                self,
+                "Thumbnail Tool",
+                "Stop eerst de huidige verwerking voordat je het venster sluit.",
+            )
             return
-        output = Path(self.output.text().strip()) if self.output.text().strip() else Path(self.selected_files[0]).parent
-        try:
-            output.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            QMessageBox.critical(self, "Thumbnail Tool", f"Doelmap kon niet worden aangemaakt.\n\n{exc}")
-            return
-        suffix = ".jpg" if self.format.currentData() == "jpg" else ".png"
-        total = len(self.selected_files)
-        success: list[Path] = []
-        failed: list[tuple[str, str]] = []
-        self.progress.setValue(0)
-        for index, source in enumerate(self.selected_files, 1):
-            self.status.setText(f"Thumbnail {index}/{total}: {Path(source).name}")
-            self.progress.setFormat(f"{index}/{total} • {Path(source).name}")
-            QApplication.processEvents()
-            target = self._unique_target(output, Path(source).stem, suffix)
-            ok, error = self._run_ffmpeg(source, str(target))
-            if ok:
-                success.append(target)
-            else:
-                failed.append((source, error))
-            self.progress.setValue(int(index * 100 / total))
-            QApplication.processEvents()
-        if not failed:
-            self.progress.setFormat(f"{len(success):,} thumbnail(s) klaar")
-            self.status.setText(f"Klaar: {len(success):,} thumbnail(s) gemaakt.")
-            QMessageBox.information(self, "Thumbnail Tool", f"Klaar.\n\n{len(success):,} thumbnail(s) gemaakt.\n\nDoelmap:\n{output}")
-            return
-        lines = [f"Gelukt: {len(success):,}", f"Mislukt: {len(failed):,}", ""]
-        for source, error in failed[:8]:
-            lines += [Path(source).name, error, ""]
-        if len(failed) > 8:
-            lines.append(f"… en nog {len(failed) - 8:,} fouten.")
-        self.status.setText(f"Klaar met fouten: {len(success):,} gelukt, {len(failed):,} mislukt.")
-        self.progress.setFormat(f"{len(success):,} gelukt / {len(failed):,} mislukt")
-        QMessageBox.warning(self, "Thumbnail Tool", "\n".join(lines))
+        event.accept()
 
 
 def main():
