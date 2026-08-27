@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -29,7 +30,8 @@ class ModuleCard(QFrame):
     def __init__(self, icon, title, description, button_text, callback, enabled=True, parent=None):
         super().__init__(parent)
         self.setObjectName("moduleCard")
-        self.setMinimumHeight(250)
+        self.setMinimumHeight(210)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(8)
@@ -45,6 +47,7 @@ class ModuleCard(QFrame):
         description_label = QLabel(description)
         description_label.setObjectName("moduleDescription")
         description_label.setWordWrap(True)
+        description_label.setMinimumHeight(48)
         layout.addWidget(description_label, 1)
 
         button = QPushButton(button_text)
@@ -86,9 +89,18 @@ class WizardWindow(QMainWindow):
         question.setObjectName("question")
         layout.addWidget(question)
 
-        grid = QGridLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 8, 0)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         choices = [
             ("🎬", "Video's bekijken", "Een of meerdere video's openen en afspelen.", self.choose_player),
@@ -126,7 +138,8 @@ class WizardWindow(QMainWindow):
             card_layout.addWidget(button)
             grid.addWidget(card, index // 2, index % 2)
 
-        layout.addLayout(grid, 1)
+        scroll.setWidget(grid_host)
+        layout.addWidget(scroll, 1)
 
         explanation = QFrame()
         explanation.setObjectName("explanation")
@@ -171,6 +184,7 @@ class WizardWindow(QMainWindow):
             QFrame#explanation { background: #15181d; border: 1px solid #303640; border-radius: 8px; }
             QLabel#explanationTitle { color: #fff; font-weight: 800; }
             QLabel#explanationText { color: #8f96a3; }
+            QScrollArea { background: transparent; border: none; }
         """)
 
     def open_and_close(self, callback):
@@ -246,9 +260,18 @@ class VideoSuiteWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        grid = QGridLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 8, 0)
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(14)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         modules = [
             ("🔎", "MEDIA SCANNER", "Analyseert video- en audiobestanden met FFprobe. Toont technische informatie zoals duur, codec, resolutie, bitrate, FPS en audio.", "Scanner openen", self.open_scanner, True),
@@ -265,7 +288,8 @@ class VideoSuiteWindow(QMainWindow):
         for index, module in enumerate(modules):
             grid.addWidget(ModuleCard(*module, parent=self), index // 2, index % 2)
 
-        layout.addLayout(grid, 1)
+        scroll.setWidget(grid_host)
+        layout.addWidget(scroll, 1)
 
         footer = QFrame()
         footer.setObjectName("footer")
@@ -308,6 +332,7 @@ class VideoSuiteWindow(QMainWindow):
             QPushButton#moduleButtonDisabled { color: #666d78; background: #202329; border-color: #2d323a; }
             QFrame#footer { background: #15181d; border: 1px solid #2d323a; border-radius: 8px; }
             QLabel#footerText { color: #7f8793; }
+            QScrollArea { background: transparent; border: none; }
         """)
 
     def _show_window(self, attribute, factory):
@@ -385,9 +410,11 @@ def main():
     app.setOrganizationName("VideoAudioScanner")
 
     window = VideoSuiteWindow()
-    window.showMaximized()
+    window.show()
     window.raise_()
     window.activateWindow()
+    QTimer.singleShot(0, window.showMaximized)
+    QTimer.singleShot(100, window.showMaximized)
 
     sys.exit(app.exec())
 
