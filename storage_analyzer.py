@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import os
+from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -9,18 +11,19 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
@@ -29,6 +32,10 @@ VIDEO_EXTENSIONS = {
 
 AUDIO_EXTENSIONS = {
     ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".opus", ".wma",
+}
+
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff",
 }
 
 
@@ -47,6 +54,8 @@ def file_type(path: str) -> str:
         return "Video"
     if suffix in AUDIO_EXTENSIONS:
         return "Audio"
+    if suffix in IMAGE_EXTENSIONS:
+        return "Afbeelding"
     return "Andere"
 
 
@@ -54,7 +63,7 @@ class StorageAnalyzerWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("VideoAudioScanner - Storage Analyzer")
-        self.resize(1250, 800)
+        self.resize(1350, 900)
         self.files: list[tuple[str, int, str]] = []
         self.current_folder = ""
         self._build_ui()
@@ -71,8 +80,8 @@ class StorageAnalyzerWindow(QMainWindow):
         layout.addWidget(title)
 
         intro = QLabel(
-            "Analyseer opslaggebruik, ontdek grote bestanden en ruim ongewenste video's op. "
-            "De analyse werkt recursief door alle onderliggende mappen."
+            "Analyseer je opslag, ontdek grote bestanden en zie meteen welke bestandstypes "
+            "de meeste ruimte gebruiken. De scan werkt recursief door alle onderliggende mappen."
         )
         intro.setObjectName("intro")
         intro.setWordWrap(True)
@@ -82,54 +91,76 @@ class StorageAnalyzerWindow(QMainWindow):
         info.setObjectName("infoPanel")
         info_layout = QHBoxLayout(info)
         info_layout.setContentsMargins(16, 12, 16, 12)
-
         self.folder_label = QLabel("Nog geen map gekozen")
         self.folder_label.setObjectName("folder")
+        self.folder_label.setToolTip("De geselecteerde scanlocatie")
         info_layout.addWidget(self.folder_label, 1)
-
-        self.total_label = QLabel("0 bestanden")
+        self.total_label = QLabel("0 bestanden • 0 B")
         self.total_label.setObjectName("total")
         info_layout.addWidget(self.total_label)
         layout.addWidget(info)
 
-        stats = QHBoxLayout()
-        stats.setSpacing(10)
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(10)
+        stats.setVerticalSpacing(10)
         self.stat_files = self._stat_card("BESTANDEN", "0")
         self.stat_size = self._stat_card("TOTALE GROOTTE", "0 B")
         self.stat_largest = self._stat_card("GROOTSTE BESTAND", "0 B")
         self.stat_videos = self._stat_card("VIDEO'S", "0")
-        for card in (self.stat_files, self.stat_size, self.stat_largest, self.stat_videos):
-            stats.addWidget(card, 1)
+        stats.addWidget(self.stat_files, 0, 0)
+        stats.addWidget(self.stat_size, 0, 1)
+        stats.addWidget(self.stat_largest, 0, 2)
+        stats.addWidget(self.stat_videos, 0, 3)
         layout.addLayout(stats)
+
+        type_panel = QFrame()
+        type_panel.setObjectName("typePanel")
+        type_layout = QVBoxLayout(type_panel)
+        type_layout.setContentsMargins(14, 12, 14, 12)
+        type_title = QLabel("OPSLAG PER BESTANDSTYPE")
+        type_title.setObjectName("sectionTitle")
+        type_layout.addWidget(type_title)
+        self.type_bars: dict[str, tuple[QProgressBar, QLabel]] = {}
+        for kind in ("Video", "Audio", "Afbeelding", "Andere"):
+            row = QHBoxLayout()
+            name = QLabel(kind)
+            name.setFixedWidth(90)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            value = QLabel("0 B • 0%")
+            value.setObjectName("barValue")
+            value.setFixedWidth(125)
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            row.addWidget(value)
+            type_layout.addLayout(row)
+            self.type_bars[kind] = (bar, value)
+        layout.addWidget(type_panel)
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-
         choose_button = QPushButton("Map kiezen")
         choose_button.clicked.connect(self.choose_folder)
         controls.addWidget(choose_button)
-
         self.scan_button = QPushButton("Scan starten")
         self.scan_button.setObjectName("primary")
         self.scan_button.setEnabled(False)
         self.scan_button.clicked.connect(self.analyze_current_folder)
         controls.addWidget(self.scan_button)
-
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("Zoeken op bestandsnaam of pad…")
+        self.filter_edit.setPlaceholderText("Zoeken op bestandsnaam, pad of extensie…")
         self.filter_edit.textChanged.connect(self.apply_filter)
         controls.addWidget(self.filter_edit, 1)
-
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["Alle types", "Video", "Audio", "Andere"])
+        self.type_combo.addItems(["Alle types", "Video", "Audio", "Afbeelding", "Andere"])
         self.type_combo.currentTextChanged.connect(self.apply_filter)
         controls.addWidget(self.type_combo)
-
         self.size_combo = QComboBox()
         self.size_combo.addItems(["Alle groottes", "> 1 GB", "> 5 GB", "> 10 GB"])
         self.size_combo.currentTextChanged.connect(self.apply_filter)
         controls.addWidget(self.size_combo)
-
         layout.addLayout(controls)
 
         actions = QHBoxLayout()
@@ -137,14 +168,11 @@ class StorageAnalyzerWindow(QMainWindow):
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_selected)
         actions.addWidget(self.open_button)
-
         self.folder_button = QPushButton("Map openen")
         self.folder_button.setEnabled(False)
         self.folder_button.clicked.connect(self.open_selected_folder)
         actions.addWidget(self.folder_button)
-
         actions.addStretch(1)
-
         self.delete_button = QPushButton("Naar Prullenbak")
         self.delete_button.setObjectName("danger")
         self.delete_button.setEnabled(False)
@@ -153,8 +181,8 @@ class StorageAnalyzerWindow(QMainWindow):
         layout.addLayout(actions)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Bestand", "Type", "Grootte", "Pad"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Bestand", "Type", "Extensie", "Grootte", "Pad"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -167,6 +195,7 @@ class StorageAnalyzerWindow(QMainWindow):
         header.setSectionResizeMode(0, header.ResizeMode.Interactive)
         header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, header.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, 1)
 
         self.status = QLabel("Klaar. Kies een map om te beginnen.")
@@ -193,6 +222,7 @@ class StorageAnalyzerWindow(QMainWindow):
         if folder:
             self.current_folder = folder
             self.folder_label.setText(folder)
+            self.folder_label.setToolTip(folder)
             self.scan_button.setEnabled(True)
             self.status.setText("Map gekozen. Klik op Scan starten.")
 
@@ -205,13 +235,16 @@ class StorageAnalyzerWindow(QMainWindow):
     def _analyze(self, folder: str):
         self.current_folder = folder
         self.folder_label.setText(folder)
+        self.folder_label.setToolTip(folder)
         self.files.clear()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
+        self._update_stats()
         self.status.setText("Analyseren…")
         self.scan_button.setEnabled(False)
         QApplication.processEvents()
 
+        scanned = 0
         try:
             for root, _, filenames in os.walk(folder):
                 for filename in filenames:
@@ -220,29 +253,33 @@ class StorageAnalyzerWindow(QMainWindow):
                         size = path.stat().st_size
                     except OSError:
                         continue
-                    kind = file_type(str(path))
-                    if kind != "Video":
-                        continue
-                    self.files.append((str(path), size, kind))
+                    self.files.append((str(path), size, file_type(str(path))))
+                    scanned += 1
+                    if scanned % 250 == 0:
+                        self.status.setText(f"Analyseren… {scanned:,} bestanden verwerkt".replace(",", "."))
+                        QApplication.processEvents()
         except OSError as exc:
             QMessageBox.critical(self, "Storage Analyzer", f"De map kon niet volledig worden gelezen:\n{exc}")
 
         self.files.sort(key=lambda item: item[1], reverse=True)
+        self._update_stats()
         self._refresh_table()
         self.scan_button.setEnabled(True)
-        self._update_stats()
-        self.status.setText(f"Analyse klaar: {len(self.files)} videobestand(en) gevonden.")
+        self.status.setText(
+            f"Analyse klaar: {len(self.files):,} bestanden gevonden."
+            .replace(",", ".")
+        )
 
     def _refresh_table(self):
         text = self.filter_edit.text().casefold().strip()
         selected_type = self.type_combo.currentText()
         size_filter = self.size_combo.currentText()
         minimum = {"> 1 GB": 1024**3, "> 5 GB": 5 * 1024**3, "> 10 GB": 10 * 1024**3}.get(size_filter, 0)
-
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for path, size, kind in self.files:
-            if text and text not in path.casefold() and text not in Path(path).name.casefold():
+            suffix = Path(path).suffix.lower() or "(geen)"
+            if text and all(part not in path.casefold() for part in (text,)) and text not in suffix.casefold():
                 continue
             if selected_type != "Alle types" and kind != selected_type:
                 continue
@@ -252,27 +289,37 @@ class StorageAnalyzerWindow(QMainWindow):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(Path(path).name))
             self.table.setItem(row, 1, QTableWidgetItem(kind))
+            self.table.setItem(row, 2, QTableWidgetItem(suffix))
             size_item = QTableWidgetItem(format_size(size))
             size_item.setData(Qt.ItemDataRole.UserRole, size)
-            self.table.setItem(row, 2, size_item)
-            self.table.setItem(row, 3, QTableWidgetItem(path))
+            self.table.setItem(row, 3, size_item)
+            self.table.setItem(row, 4, QTableWidgetItem(path))
         self.table.setSortingEnabled(True)
         self._update_action_state()
 
     def apply_filter(self):
         self._refresh_table()
         visible = self.table.rowCount()
-        self.status.setText(f"{visible} bestand(en) zichtbaar.")
+        self.status.setText(f"{visible:,} bestand(en) zichtbaar.".replace(",", "."))
 
     def _update_stats(self):
         total_size = sum(size for _, size, _ in self.files)
         largest = max((size for _, size, _ in self.files), default=0)
         videos = sum(1 for _, _, kind in self.files if kind == "Video")
-        self.stat_files.value_label.setText(str(len(self.files)))
+        self.stat_files.value_label.setText(f"{len(self.files):,}".replace(",", "."))
         self.stat_size.value_label.setText(format_size(total_size))
         self.stat_largest.value_label.setText(format_size(largest))
-        self.stat_videos.value_label.setText(str(videos))
-        self.total_label.setText(f"{len(self.files)} bestanden • {format_size(total_size)}")
+        self.stat_videos.value_label.setText(f"{videos:,}".replace(",", "."))
+        self.total_label.setText(f"{len(self.files):,} bestanden • {format_size(total_size)}".replace(",", "."))
+
+        totals: dict[str, int] = defaultdict(int)
+        for _, size, kind in self.files:
+            totals[kind] += size
+        for kind, (bar, value) in self.type_bars.items():
+            amount = totals.get(kind, 0)
+            percent = int(round(amount * 100 / total_size)) if total_size else 0
+            bar.setValue(percent)
+            value.setText(f"{format_size(amount)} • {percent}%")
 
     def _selected_paths(self) -> list[str]:
         result = []
@@ -283,7 +330,7 @@ class StorageAnalyzerWindow(QMainWindow):
         return result
 
     def _path_at_row(self, row: int) -> str:
-        item = self.table.item(row, 3)
+        item = self.table.item(row, 4)
         return item.text() if item else ""
 
     def _update_action_state(self):
@@ -309,9 +356,8 @@ class StorageAnalyzerWindow(QMainWindow):
         paths = self._selected_paths()
         if not paths:
             return
-        folder = str(Path(paths[0]).parent)
         try:
-            os.startfile(folder)
+            os.startfile(str(Path(paths[0]).parent))
         except OSError as exc:
             QMessageBox.warning(self, "Map openen", str(exc))
 
@@ -332,7 +378,6 @@ class StorageAnalyzerWindow(QMainWindow):
             QMessageBox.warning(self, "Prullenbak", "De Windows Prullenbak is alleen beschikbaar op Windows.")
             return
 
-        import ctypes
         from ctypes import wintypes
 
         class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -345,15 +390,16 @@ class StorageAnalyzerWindow(QMainWindow):
 
         existing = [path for path in paths if Path(path).is_file()]
         failed = [path for path in paths if path not in existing]
+        moved: list[str] = []
         if existing:
             source = "".join(path + "\0" for path in existing) + "\0"
-            operation = SHFILEOPSTRUCTW(None, 0x0003, source, None, 0x0004 | 0x0010 | 0x0040 | 0x0400, False, None, None)
+            flags = 0x0004 | 0x0010 | 0x0040 | 0x0400
+            operation = SHFILEOPSTRUCTW(None, 0x0003, source, None, flags, False, None, None)
             result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-            moved = existing if result == 0 and not operation.fAnyOperationsAborted else []
-            if not moved:
+            if result == 0 and not operation.fAnyOperationsAborted:
+                moved = existing
+            else:
                 failed.extend(existing)
-        else:
-            moved = []
 
         moved_set = set(moved)
         self.files = [item for item in self.files if item[0] not in moved_set]
@@ -369,11 +415,12 @@ class StorageAnalyzerWindow(QMainWindow):
             QMainWindow { background: #0d0f13; }
             QLabel#title { font-size: 30px; font-weight: 900; color: #ffffff; }
             QLabel#intro { color: #9da5b1; font-size: 14px; }
-            QFrame#infoPanel, QFrame#statCard { background: #191c22; border: 1px solid #303640; border-radius: 10px; }
+            QFrame#infoPanel, QFrame#statCard, QFrame#typePanel { background: #191c22; border: 1px solid #303640; border-radius: 10px; }
             QLabel#folder { color: #d9dde3; }
             QLabel#total { color: #ffffff; font-weight: 700; }
-            QLabel#statCaption { color: #7f8793; font-size: 11px; font-weight: 700; }
+            QLabel#statCaption, QLabel#sectionTitle { color: #7f8793; font-size: 11px; font-weight: 800; }
             QLabel#statValue { color: #ffffff; font-size: 20px; font-weight: 800; }
+            QLabel#barValue { color: #aeb5c0; }
             QLabel#status { color: #aeb5c0; padding: 3px; }
             QLineEdit, QComboBox, QTableWidget { background: #1e2127; border: 1px solid #353a43; border-radius: 6px; }
             QLineEdit { padding: 9px; }
@@ -385,6 +432,8 @@ class StorageAnalyzerWindow(QMainWindow):
             QPushButton#danger { background: #54272b; border-color: #824047; color: #ffffff; }
             QPushButton#danger:hover { background: #6a3036; }
             QPushButton:disabled { color: #666c75; background: #202329; }
+            QProgressBar { background: #20242a; border: 1px solid #353a43; border-radius: 5px; height: 14px; }
+            QProgressBar::chunk { background: #477dcc; border-radius: 4px; }
             QTableWidget { gridline-color: #30343b; alternate-background-color: #20242b; }
             QHeaderView::section { background: #252a31; color: #cfd4dc; padding: 8px; border: 0; border-right: 1px solid #343941; }
             QTableWidget::item:selected { background: #304a70; }
