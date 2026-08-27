@@ -4,8 +4,16 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QVBoxLayout, QWidget,
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from duplicate_finder import DuplicateFinderWindow
@@ -25,11 +33,25 @@ class ModuleCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(8)
-        icon_label = QLabel(icon); icon_label.setObjectName("moduleIcon"); layout.addWidget(icon_label)
-        title_label = QLabel(title); title_label.setObjectName("moduleTitle"); layout.addWidget(title_label)
-        description_label = QLabel(description); description_label.setObjectName("moduleDescription"); description_label.setWordWrap(True); layout.addWidget(description_label, 1)
-        button = QPushButton(button_text); button.setObjectName("moduleButton" if enabled else "moduleButtonDisabled"); button.setEnabled(enabled)
-        if enabled and callback: button.clicked.connect(callback)
+
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("moduleIcon")
+        layout.addWidget(icon_label)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("moduleTitle")
+        layout.addWidget(title_label)
+
+        description_label = QLabel(description)
+        description_label.setObjectName("moduleDescription")
+        description_label.setWordWrap(True)
+        layout.addWidget(description_label, 1)
+
+        button = QPushButton(button_text)
+        button.setObjectName("moduleButton" if enabled else "moduleButtonDisabled")
+        button.setEnabled(enabled)
+        if enabled and callback:
+            button.clicked.connect(callback)
         layout.addWidget(button)
 
 
@@ -39,14 +61,35 @@ class WizardWindow(QMainWindow):
         self.suite = suite
         self.setWindowTitle("VideoAudioScanner - Wat wil je doen?")
         self.resize(900, 700)
-        self._build_ui(); self._apply_theme()
+        self._build_ui()
+        self._apply_theme()
 
     def _build_ui(self):
-        root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(28, 24, 28, 24); layout.setSpacing(18)
-        title = QLabel("🧭  VIDEO WIZARD"); title.setObjectName("wizardTitle"); layout.addWidget(title)
-        intro = QLabel("Je hoeft niet te weten welke module je nodig hebt. Kies gewoon wat je met je video's wilt doen."); intro.setObjectName("wizardIntro"); intro.setWordWrap(True); layout.addWidget(intro)
-        question = QLabel("Wat wil je doen?"); question.setObjectName("question"); layout.addWidget(question)
-        grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(12)
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(18)
+
+        title = QLabel("🧭  VIDEO WIZARD")
+        title.setObjectName("wizardTitle")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "Je hoeft niet te weten welke module je nodig hebt. "
+            "Kies gewoon wat je met je video's wilt doen."
+        )
+        intro.setObjectName("wizardIntro")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        question = QLabel("Wat wil je doen?")
+        question.setObjectName("question")
+        layout.addWidget(question)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
         choices = [
             ("🎬", "Video's bekijken", "Een of meerdere video's openen en afspelen.", self.choose_player),
             ("♻", "Dubbele video's zoeken", "Exact dezelfde of visueel bijna dezelfde video's vinden.", self.choose_duplicates),
@@ -56,21 +99,59 @@ class WizardWindow(QMainWindow):
             ("💾", "Opslagruimte bekijken", "Ontdekken welke bestanden de meeste ruimte innemen.", self.choose_storage),
             ("📚", "Video Library", "Een visueel overzicht met thumbnails, zoeken en sorteren.", self.choose_library),
         ]
+
         for index, choice in enumerate(choices):
             icon, title_text, description, callback = choice
-            card = QFrame(); card.setObjectName("wizardCard")
-            card_layout = QVBoxLayout(card); card_layout.setContentsMargins(16, 14, 16, 14); card_layout.setSpacing(7)
-            icon_label = QLabel(icon); icon_label.setObjectName("wizardIcon"); card_layout.addWidget(icon_label)
-            title_label = QLabel(title_text); title_label.setObjectName("wizardCardTitle"); card_layout.addWidget(title_label)
-            desc_label = QLabel(description); desc_label.setObjectName("wizardCardDescription"); desc_label.setWordWrap(True); card_layout.addWidget(desc_label, 1)
-            button = QPushButton("Deze functie gebruiken"); button.clicked.connect(callback); card_layout.addWidget(button)
+            card = QFrame()
+            card.setObjectName("wizardCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 14, 16, 14)
+            card_layout.setSpacing(7)
+
+            icon_label = QLabel(icon)
+            icon_label.setObjectName("wizardIcon")
+            card_layout.addWidget(icon_label)
+
+            title_label = QLabel(title_text)
+            title_label.setObjectName("wizardCardTitle")
+            card_layout.addWidget(title_label)
+
+            desc_label = QLabel(description)
+            desc_label.setObjectName("wizardCardDescription")
+            desc_label.setWordWrap(True)
+            card_layout.addWidget(desc_label, 1)
+
+            button = QPushButton("Deze functie gebruiken")
+            button.clicked.connect(callback)
+            card_layout.addWidget(button)
             grid.addWidget(card, index // 2, index % 2)
+
         layout.addLayout(grid, 1)
-        explanation = QFrame(); explanation.setObjectName("explanation"); explanation_layout = QVBoxLayout(explanation); explanation_layout.setContentsMargins(16, 14, 16, 14)
-        explanation_title = QLabel("Tip"); explanation_title.setObjectName("explanationTitle"); explanation_layout.addWidget(explanation_title)
-        explanation_text = QLabel("Twijfel je? Gebruik deze Wizard. Je hoeft alleen je doel te kiezen."); explanation_text.setWordWrap(True); explanation_text.setObjectName("explanationText"); explanation_layout.addWidget(explanation_text)
+
+        explanation = QFrame()
+        explanation.setObjectName("explanation")
+        explanation_layout = QVBoxLayout(explanation)
+        explanation_layout.setContentsMargins(16, 14, 16, 14)
+
+        explanation_title = QLabel("Tip")
+        explanation_title.setObjectName("explanationTitle")
+        explanation_layout.addWidget(explanation_title)
+
+        explanation_text = QLabel(
+            "Twijfel je? Gebruik deze Wizard. Je hoeft alleen je doel te kiezen."
+        )
+        explanation_text.setWordWrap(True)
+        explanation_text.setObjectName("explanationText")
+        explanation_layout.addWidget(explanation_text)
         layout.addWidget(explanation)
-        buttons = QHBoxLayout(); buttons.addStretch(1); close = QPushButton("Sluiten"); close.clicked.connect(self.close); buttons.addWidget(close); layout.addLayout(buttons)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close = QPushButton("Sluiten")
+        close.clicked.connect(self.close)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
         self.setCentralWidget(root)
 
     def _apply_theme(self):
@@ -92,7 +173,10 @@ class WizardWindow(QMainWindow):
             QLabel#explanationText { color: #8f96a3; }
         """)
 
-    def open_and_close(self, callback): self.close(); callback()
+    def open_and_close(self, callback):
+        self.close()
+        callback()
+
     def choose_player(self): self.open_and_close(self.suite.open_player)
     def choose_duplicates(self): self.open_and_close(self.suite.open_duplicates)
     def choose_quality(self): self.open_and_close(self.suite.open_quality)
@@ -105,21 +189,67 @@ class WizardWindow(QMainWindow):
 class VideoSuiteWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VideoAudioScanner - Video Suite"); self.resize(1180, 850)
-        self.scanner_window = None; self.duplicate_window = None; self.quality_window = None; self.converter_window = None
-        self.storage_window = None; self.library_window = None; self.wizard_window = None; self.player_windows = []
-        self._build_ui(); self._apply_theme()
+        self.setWindowTitle("VideoAudioScanner - Video Suite")
+        self.resize(1180, 850)
+
+        self.scanner_window = None
+        self.duplicate_window = None
+        self.quality_window = None
+        self.converter_window = None
+        self.storage_window = None
+        self.library_window = None
+        self.wizard_window = None
+        self.player_windows = []
+
+        self._build_ui()
+        self._apply_theme()
 
     def _build_ui(self):
-        root = QWidget(); layout = QVBoxLayout(root); layout.setContentsMargins(28, 24, 28, 24); layout.setSpacing(18)
-        header = QHBoxLayout(); title_box = QVBoxLayout(); title_box.setSpacing(2)
-        title = QLabel("VIDEO SUITE"); title.setObjectName("suiteTitle"); title_box.addWidget(title)
-        subtitle = QLabel("VideoAudioScanner"); subtitle.setObjectName("suiteSubtitle"); title_box.addWidget(subtitle)
-        header.addLayout(title_box); header.addStretch(1)
-        wizard_button = QPushButton("🧭  Wizard"); wizard_button.setObjectName("wizardButton"); wizard_button.setToolTip("Laat de Wizard bepalen welke module je nodig hebt."); wizard_button.clicked.connect(self.open_wizard); header.addWidget(wizard_button)
-        credit = QLabel("MADE BY KID ACID"); credit.setObjectName("credit"); credit.setAlignment(Qt.AlignmentFlag.AlignCenter); header.addWidget(credit); layout.addLayout(header)
-        intro = QLabel("Kies een functie hieronder. Je hoeft niet alles te kennen: bij iedere module staat duidelijk waarvoor ze dient. Weet je het niet? Gebruik de Wizard."); intro.setObjectName("intro"); intro.setWordWrap(True); layout.addWidget(intro)
-        grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(14)
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(18)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+
+        title = QLabel("VIDEO SUITE")
+        title.setObjectName("suiteTitle")
+        title_box.addWidget(title)
+
+        subtitle = QLabel("VideoAudioScanner")
+        subtitle.setObjectName("suiteSubtitle")
+        title_box.addWidget(subtitle)
+
+        header.addLayout(title_box)
+        header.addStretch(1)
+
+        wizard_button = QPushButton("🧭  Wizard")
+        wizard_button.setObjectName("wizardButton")
+        wizard_button.setToolTip("Laat de Wizard bepalen welke module je nodig hebt.")
+        wizard_button.clicked.connect(self.open_wizard)
+        header.addWidget(wizard_button)
+
+        credit = QLabel("MADE BY KID ACID")
+        credit.setObjectName("credit")
+        credit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(credit)
+        layout.addLayout(header)
+
+        intro = QLabel(
+            "Kies een functie hieronder. Je hoeft niet alles te kennen: "
+            "bij iedere module staat duidelijk waarvoor ze dient. "
+            "Weet je het niet? Gebruik de Wizard."
+        )
+        intro.setObjectName("intro")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
+
         modules = [
             ("🔎", "MEDIA SCANNER", "Analyseert video- en audiobestanden met FFprobe. Toont technische informatie zoals duur, codec, resolutie, bitrate, FPS en audio.", "Scanner openen", self.open_scanner, True),
             ("♻", "DUPLICATEN", "Zoekt exacte duplicaten en video's die visueel sterk op elkaar lijken. Je kunt de versies vergelijken en slechte versies naar de Prullenbak sturen.", "Duplicaten zoeken", self.open_duplicates, True),
@@ -131,11 +261,29 @@ class VideoSuiteWindow(QMainWindow):
             ("🖼", "THUMBNAIL TOOL", "Maak thumbnails uit video's en gebruik ze bijvoorbeeld voor een overzicht of bibliotheek.", "Binnenkort", None, False),
             ("🛠", "VIDEO TOOLS", "Extra gereedschap voor metadata, controle, bestandsonderhoud en videobeheer.", "Binnenkort", None, False),
         ]
-        for index, module in enumerate(modules): grid.addWidget(ModuleCard(*module, parent=self), index // 2, index % 2)
+
+        for index, module in enumerate(modules):
+            grid.addWidget(ModuleCard(*module, parent=self), index // 2, index % 2)
+
         layout.addLayout(grid, 1)
-        footer = QFrame(); footer.setObjectName("footer"); footer_layout = QHBoxLayout(footer); footer_layout.setContentsMargins(16, 10, 16, 10)
-        footer_text = QLabel("Tip: als je niet weet welke functie je nodig hebt, klik bovenaan op de Wizard."); footer_text.setObjectName("footerText"); footer_layout.addWidget(footer_text); footer_layout.addStretch(1)
-        close_button = QPushButton("Afsluiten"); close_button.clicked.connect(self.close); footer_layout.addWidget(close_button); layout.addWidget(footer)
+
+        footer = QFrame()
+        footer.setObjectName("footer")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 10, 16, 10)
+
+        footer_text = QLabel(
+            "Tip: als je niet weet welke functie je nodig hebt, klik bovenaan op de Wizard."
+        )
+        footer_text.setObjectName("footerText")
+        footer_layout.addWidget(footer_text)
+        footer_layout.addStretch(1)
+
+        close_button = QPushButton("Afsluiten")
+        close_button.clicked.connect(self.close)
+        footer_layout.addWidget(close_button)
+        layout.addWidget(footer)
+
         self.setCentralWidget(root)
 
     def _apply_theme(self):
@@ -165,13 +313,20 @@ class VideoSuiteWindow(QMainWindow):
     def _show_window(self, attribute, factory):
         window = getattr(self, attribute)
         if window is None:
-            window = factory(); setattr(self, attribute, window); window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        window.show(); window.raise_(); window.activateWindow()
+            window = factory()
+            setattr(self, attribute, window)
+            window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def open_wizard(self):
         if self.wizard_window is None:
-            self.wizard_window = WizardWindow(self); self.wizard_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        self.wizard_window.show(); self.wizard_window.raise_(); self.wizard_window.activateWindow()
+            self.wizard_window = WizardWindow(self)
+            self.wizard_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.wizard_window.show()
+        self.wizard_window.raise_()
+        self.wizard_window.activateWindow()
 
     def open_scanner(self): self._show_window("scanner_window", ScannerWindow)
     def open_duplicates(self): self._show_window("duplicate_window", DuplicateFinderWindow)
@@ -181,26 +336,61 @@ class VideoSuiteWindow(QMainWindow):
     def open_library(self): self._show_window("library_window", lambda: VideoLibraryWindow(self))
 
     def open_player(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Kies video's", "", "Video's (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.mpeg *.mpg *.ts *.mts *.m2ts);;Alle bestanden (*)")
-        if not paths: return
-        window = VideoPlayerWindow(paths[0], self, playlist=paths); self.player_windows.append(window)
-        window.destroyed.connect(lambda: self.player_windows.remove(window) if window in self.player_windows else None)
-        window.show(); window.raise_(); window.activateWindow()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Kies video's",
+            "",
+            "Video's (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.mpeg *.mpg *.ts *.mts *.m2ts);;Alle bestanden (*)",
+        )
+        if not paths:
+            return
+
+        window = VideoPlayerWindow(paths[0], self, playlist=paths)
+        self.player_windows.append(window)
+        window.destroyed.connect(
+            lambda: self.player_windows.remove(window)
+            if window in self.player_windows else None
+        )
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def closeEvent(self, event):
         for window in list(self.player_windows):
-            try: window.close()
-            except RuntimeError: pass
-        for window in (self.scanner_window, self.duplicate_window, self.quality_window, self.converter_window, self.storage_window, self.library_window, self.wizard_window):
+            try:
+                window.close()
+            except RuntimeError:
+                pass
+
+        for window in (
+            self.scanner_window,
+            self.duplicate_window,
+            self.quality_window,
+            self.converter_window,
+            self.storage_window,
+            self.library_window,
+            self.wizard_window,
+        ):
             if window is not None:
-                try: window.close()
-                except RuntimeError: pass
+                try:
+                    window.close()
+                except RuntimeError:
+                    pass
         event.accept()
 
 
 def main():
-    app = QApplication(sys.argv); app.setApplicationName("VideoAudioScanner"); app.setOrganizationName("VideoAudioScanner")
-    window = VideoSuiteWindow(); window.show(); sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    app.setApplicationName("VideoAudioScanner")
+    app.setOrganizationName("VideoAudioScanner")
+
+    window = VideoSuiteWindow()
+    window.showMaximized()
+    window.raise_()
+    window.activateWindow()
+
+    sys.exit(app.exec())
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
