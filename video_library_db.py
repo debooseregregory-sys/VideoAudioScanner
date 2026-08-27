@@ -31,12 +31,26 @@ class VideoLibraryDB:
                     modified REAL NOT NULL DEFAULT 0,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     thumbnail_path TEXT NOT NULL DEFAULT '',
-                    indexed_at REAL NOT NULL DEFAULT 0
+                    indexed_at REAL NOT NULL DEFAULT 0,
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    watched INTEGER NOT NULL DEFAULT 0,
+                    watched_at REAL NOT NULL DEFAULT 0
                 )
             """)
+            self._ensure_column(con, "favorite", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(con, "watched", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(con, "watched_at", "REAL NOT NULL DEFAULT 0")
             con.execute("CREATE INDEX IF NOT EXISTS idx_videos_name ON videos(name)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_videos_size ON videos(size)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_videos_modified ON videos(modified)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_videos_favorite ON videos(favorite)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_videos_watched ON videos(watched)")
+
+    @staticmethod
+    def _ensure_column(con, name: str, definition: str):
+        columns = {row[1] for row in con.execute("PRAGMA table_info(videos)").fetchall()}
+        if name not in columns:
+            con.execute(f"ALTER TABLE videos ADD COLUMN {name} {definition}")
 
     def get(self, path: str):
         with self._connect() as con:
@@ -50,9 +64,13 @@ class VideoLibraryDB:
              modified: float, metadata: dict | None = None,
              thumbnail_path: str = "", indexed_at: float = 0):
         with self._connect() as con:
+            old = con.execute("SELECT favorite, watched, watched_at FROM videos WHERE path = ?", (path,)).fetchone()
+            favorite = int(old["favorite"]) if old else 0
+            watched = int(old["watched"]) if old else 0
+            watched_at = float(old["watched_at"]) if old else 0
             con.execute("""
-                INSERT INTO videos(path,name,extension,size,modified,metadata_json,thumbnail_path,indexed_at)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO videos(path,name,extension,size,modified,metadata_json,thumbnail_path,indexed_at,favorite,watched,watched_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(path) DO UPDATE SET
                     name=excluded.name,
                     extension=excluded.extension,
@@ -64,8 +82,20 @@ class VideoLibraryDB:
             """, (
                 path, name, extension, int(size), float(modified),
                 json.dumps(metadata or {}, ensure_ascii=False),
-                thumbnail_path, float(indexed_at),
+                thumbnail_path, float(indexed_at), favorite, watched, watched_at,
             ))
+
+    def set_favorite(self, path: str, value: bool):
+        with self._connect() as con:
+            con.execute("UPDATE videos SET favorite = ? WHERE path = ?", (1 if value else 0, path))
+
+    def set_watched(self, path: str, value: bool):
+        import time
+        with self._connect() as con:
+            con.execute(
+                "UPDATE videos SET watched = ?, watched_at = ? WHERE path = ?",
+                (1 if value else 0, time.time() if value else 0, path),
+            )
 
     def delete_missing_under_root(self, root: str | Path, existing_paths: Iterable[str]):
         root_path = Path(root).resolve()
