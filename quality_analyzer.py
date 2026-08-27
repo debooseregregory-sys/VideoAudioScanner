@@ -2,26 +2,12 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from scanner import VIDEO_EXTENSIONS, MediaScanner
 
@@ -69,7 +55,6 @@ def calculate_quality(result) -> tuple[int, str]:
     pixels = width * height
     bitrate = _bitrate(result.bitrate)
     fps = _number(result.fps)
-
     score = 0.0
     if pixels >= 3840 * 2160:
         score += 50
@@ -83,7 +68,6 @@ def calculate_quality(result) -> tuple[int, str]:
         score += 18
     elif pixels:
         score += 8
-
     if bitrate >= 20000:
         score += 25
     elif bitrate >= 10000:
@@ -94,7 +78,6 @@ def calculate_quality(result) -> tuple[int, str]:
         score += 12
     elif bitrate >= 1500:
         score += 7
-
     codec = (result.video_codec or "").casefold()
     if codec in {"hevc", "h265", "av1"}:
         score += 10
@@ -102,17 +85,14 @@ def calculate_quality(result) -> tuple[int, str]:
         score += 8
     elif codec:
         score += 5
-
     if fps >= 50:
         score += 7
     elif fps >= 24:
         score += 5
     elif fps > 0:
         score += 2
-
     if result.audio_codec not in {"—", ""}:
         score += 3
-
     score = max(0, min(100, round(score)))
     grade = "A+" if score >= 95 else "A" if score >= 85 else "B" if score >= 70 else "C" if score >= 55 else "D" if score >= 40 else "E"
     return int(score), grade
@@ -131,10 +111,7 @@ class QualityWorker(QThread):
     def run(self):
         try:
             scanner = MediaScanner(self.ffprobe)
-            paths = sorted(
-                (p for p in Path(self.folder).rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS),
-                key=lambda p: str(p).casefold(),
-            )
+            paths = sorted((p for p in Path(self.folder).rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS), key=lambda p: str(p).casefold())
             total = len(paths)
             for index, path in enumerate(paths, 1):
                 item = scanner._inspect(path)
@@ -160,7 +137,6 @@ class QualityAnalyzerWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 16, 18, 18)
         layout.setSpacing(10)
-
         header = QHBoxLayout()
         title = QLabel("QUALITY ANALYZER")
         title.setObjectName("title")
@@ -170,12 +146,10 @@ class QualityAnalyzerWindow(QMainWindow):
         credit.setObjectName("credit")
         header.addWidget(credit)
         layout.addLayout(header)
-
         info = QLabel("Beoordeel videokwaliteit op basis van resolutie, bitrate, codec, FPS en audio. De score is een praktische vergelijking en geen objectieve beeldkwaliteitsmeting.")
         info.setWordWrap(True)
         info.setObjectName("subtitle")
         layout.addWidget(info)
-
         source = QFrame()
         source.setObjectName("panel")
         source_layout = QHBoxLayout(source)
@@ -190,7 +164,6 @@ class QualityAnalyzerWindow(QMainWindow):
         source_layout.addWidget(choose)
         source_layout.addWidget(self.scan_button)
         layout.addWidget(source)
-
         stats = QFrame()
         stats.setObjectName("panel")
         stats_layout = QHBoxLayout(stats)
@@ -208,14 +181,12 @@ class QualityAnalyzerWindow(QMainWindow):
             stats_layout.addLayout(box)
             stats_layout.addStretch(1)
         layout.addWidget(stats)
-
         self.progress = QProgressBar()
         self.progress.setFormat("%v / %m")
         layout.addWidget(self.progress)
         self.status = QLabel("Klaar om te analyseren.")
         self.status.setObjectName("status")
         layout.addWidget(self.status)
-
         self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(["Score", "Grade", "Bestand", "Resolutie", "Bitrate", "Duur", "Video codec", "Audio codec", "FPS", "Grootte", "Status"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -228,7 +199,6 @@ class QualityAnalyzerWindow(QMainWindow):
             self.table.setColumnWidth(index, width)
         self.table.cellDoubleClicked.connect(self.open_selected)
         layout.addWidget(self.table, 1)
-
         actions = QHBoxLayout()
         export = QPushButton("CSV exporteren")
         export.clicked.connect(self.export_csv)
@@ -310,6 +280,7 @@ class QualityAnalyzerWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, result.score)
             if column == 2:
                 item.setToolTip(result.path)
+                item.setData(Qt.ItemDataRole.UserRole, result.path)
             self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
 
@@ -342,13 +313,13 @@ class QualityAnalyzerWindow(QMainWindow):
 
     def open_selected(self, row=None, _column=None):
         if row is None:
-            selected = self.table.currentRow()
-            if selected < 0:
-                return
-            row = selected
-        if row < 0 or row >= len(self.rows):
+            row = self.table.currentRow()
+        if row < 0:
             return
-        path = self.rows[row].path
+        item = self.table.item(row, 2)
+        path = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not path:
+            return
         try:
             os.startfile(path)
         except OSError as exc:
@@ -369,11 +340,10 @@ class QualityAnalyzerWindow(QMainWindow):
 
 
 def main():
-    app = QApplication.instance() or QApplication([])
+    app = QApplication(sys.argv)
     window = QualityAnalyzerWindow()
     window.show()
-    if not QApplication.instance():
-        app.exec()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
