@@ -181,7 +181,7 @@ class _WorkerSignals(QObject):
 
 class ThumbnailThread(QThread):
     progress = Signal(int, int, str, bool, str)
-    finished = Signal(str, bool, str, str, int, int)
+    result = Signal(str, bool, str, str, int, int)
 
     def __init__(self, worker: ThumbnailWorker, parent=None):
         super().__init__(parent)
@@ -190,7 +190,7 @@ class ThumbnailThread(QThread):
     def run(self):
         signals = _WorkerSignals()
         signals.progress.connect(self.progress.emit)
-        signals.finished.connect(self.finished.emit)
+        signals.finished.connect(self.result.emit)
         self.worker.run(signals)
 
 
@@ -536,7 +536,7 @@ class ThumbnailToolWindow(QDialog):
         self._worker = worker
         self._thread = ThumbnailThread(worker, self)
         self._thread.progress.connect(self._worker_progress)
-        self._thread.finished.connect(self._worker_finished)
+        self._thread.result.connect(self._worker_finished)
         self._thread.finished.connect(self._thread_finished)
         self._set_busy(True)
         self._thread.start()
