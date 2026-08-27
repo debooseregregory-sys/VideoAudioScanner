@@ -546,7 +546,7 @@ class ThumbnailToolWindow(QDialog):
         self._thread = ThumbnailThread(worker, self)
         self._thread.progress.connect(self._worker_progress)
         self._thread.finished.connect(self._worker_finished)
-        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._thread_finished)
         self._set_busy(True)
         self._thread.start()
 
