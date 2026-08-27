@@ -171,15 +171,6 @@ class ThumbnailWorker:
         signals.finished.emit("batch", not self.stop_event.is_set(), "", "", 0, total)
 
 
-class WorkerSignals:
-    progress = None
-    finished = None
-
-
-class ThumbnailWorkerSignals:
-    """Signal container created as a QObject-like helper by the QThread owner."""
-
-
 from PySide6.QtCore import QObject
 
 
@@ -593,7 +584,8 @@ class ThumbnailToolWindow(QDialog):
                 self.status.setText("Voorbeeld mislukt.")
                 self.progress.setFormat("Voorbeeld mislukt")
         else:
-            self._batch_stopped = self._worker.stop_event.is_set()
+            worker = self._worker
+            self._batch_stopped = worker.stop_event.is_set() if worker is not None else self._batch_stopped
             if self._batch_stopped:
                 self.status.setText(
                     f"Gestopt: {self._batch_success:,} gelukt, "
@@ -616,9 +608,13 @@ class ThumbnailToolWindow(QDialog):
 
             self._show_batch_result()
 
-        self._set_busy(False)
+    def _thread_finished(self):
+        thread = self._thread
         self._thread = None
         self._worker = None
+        self._set_busy(False)
+        if thread is not None:
+            thread.deleteLater()
 
     def _show_batch_result(self):
         if self._batch_stopped:
