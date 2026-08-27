@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from duplicate_finder import DuplicateFinderWindow
+from video_player import VideoPlayerWindow
 from duplicate_fixes import install_fixes
 from scanner import MediaResult, MediaScanner
 
@@ -139,7 +140,10 @@ class MainWindow(QMainWindow):
             box = QWidget(); box_layout = QVBoxLayout(box); box_layout.setContentsMargins(4, 2, 4, 2); label = QLabel(caption); label.setObjectName("statCaption"); box_layout.addWidget(label); box_layout.addWidget(widget); stats_layout.addWidget(box, 0, col)
         layout.addWidget(stats)
         filter_box = QGroupBox("Filter resultaten"); filter_layout = QHBoxLayout(filter_box); self.search = QLineEdit(); self.search.setPlaceholderText("Zoeken op naam, pad, codec, resolutie…"); self.search.textChanged.connect(self.apply_filters); self.type_filter = QComboBox(); self.type_filter.addItems(["Alle", "Video", "Audio"]); self.type_filter.currentTextChanged.connect(self.apply_filters); self.status_filter = QComboBox(); self.status_filter.addItems(["Alle", "OK", "Fouten"]); self.status_filter.currentTextChanged.connect(self.apply_filters); clear = QPushButton("Filters wissen"); clear.clicked.connect(self.clear_filters); self.select_all_button = QPushButton("Alles selecteren"); self.select_all_button.clicked.connect(self.select_all_visible); self.delete_button = QPushButton("🗑  Naar Prullenbak"); self.delete_button.setObjectName("danger"); self.delete_button.clicked.connect(self.delete_selected)
-        filter_layout.addWidget(self.search, 1); filter_layout.addWidget(QLabel("Type:")); filter_layout.addWidget(self.type_filter); filter_layout.addWidget(QLabel("Status:")); filter_layout.addWidget(self.status_filter); filter_layout.addWidget(clear); filter_layout.addWidget(self.select_all_button); filter_layout.addWidget(self.delete_button); layout.addWidget(filter_box)
+        self.play_selected_button = QPushButton("Geselecteerde video's afspelen")
+        self.play_selected_button.setObjectName("secondary")
+        self.play_selected_button.clicked.connect(self.play_selected_videos)
+        filter_layout.addWidget(self.search, 1); filter_layout.addWidget(QLabel("Type:")); filter_layout.addWidget(self.type_filter); filter_layout.addWidget(QLabel("Status:")); filter_layout.addWidget(self.status_filter); filter_layout.addWidget(clear); filter_layout.addWidget(self.select_all_button); filter_layout.addWidget(self.delete_button); filter_layout.addWidget(self.play_selected_button); layout.addWidget(filter_box)
         self.progress = QProgressBar(); self.progress.setTextVisible(True); self.progress.setFormat("%v / %m"); layout.addWidget(self.progress); self.status = QLabel("Klaar om te scannen."); self.status.setObjectName("status"); layout.addWidget(self.status)
         self.table = QTableView(); self.table.setModel(self.proxy); self.table.setSortingEnabled(True); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True); self.table.doubleClicked.connect(self.open_selected); self.table.selectionModel().selectionChanged.connect(self._update_action_state)
         header = self.table.horizontalHeader(); header.setStretchLastSection(False); header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -229,6 +233,40 @@ class MainWindow(QMainWindow):
         enabled = bool(self._selected_items()) if hasattr(self, "table") else False
         if hasattr(self, "delete_button"): self.delete_button.setEnabled(enabled)
         if hasattr(self, "delete_action"): self.delete_action.setEnabled(enabled)
+
+    def play_selected_videos(self):
+        items = self._selected_items()
+        videos = [item for item in items if item.media_type == "Video"]
+
+        if not videos:
+            QMessageBox.information(
+                self,
+                "Video afspelen",
+                "Selecteer eerst ??n of meer video's."
+            )
+            return
+
+        if not hasattr(self, 'video_windows'):
+            self.video_windows = []
+
+        window = VideoPlayerWindow(
+            videos[0].path,
+            self,
+            playlist=[item.path for item in videos]
+        )
+
+        self.video_windows.append(window)
+
+        window.destroyed.connect(
+            lambda: self.video_windows.remove(window)
+            if window in self.video_windows
+            else None
+        )
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
     def delete_selected(self):
         items = self._selected_items()
         if not items: return
@@ -242,9 +280,37 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(self.model.rowCount() > 0)
     def open_selected(self):
         items = self._selected_items()
-        if not items: return
-        try: os.startfile(items[0].path)
-        except Exception as exc: QMessageBox.warning(self, "Openen", f"Kon bestand niet openen:\n{exc}")
+        if not items:
+            return
+
+        item = items[0]
+
+        if item.media_type == "Video":
+            if not hasattr(self, "video_windows"):
+                self.video_windows = []
+
+            window = VideoPlayerWindow(item.path, self)
+            self.video_windows.append(window)
+
+            window.destroyed.connect(
+                lambda: self.video_windows.remove(window)
+                if window in self.video_windows
+                else None
+            )
+
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            return
+
+        try:
+            os.startfile(item.path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Openen",
+                f"Kon bestand niet openen:\n{exc}"
+            )
     def export_csv(self):
         if not self.model.items: return
         path, _ = QFileDialog.getSaveFileName(self, "CSV exporteren", "VideoAudioScanner.csv", "CSV-bestanden (*.csv)")
