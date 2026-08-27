@@ -92,6 +92,10 @@ class VideoLibraryDB:
                 thumbnail_path, float(indexed_at), favorite, watched, watched_at,
             ))
 
+    def delete_video(self, path: str):
+        with self._connect() as con:
+            con.execute("DELETE FROM videos WHERE path = ?", (path,))
+
     def set_favorite(self, path: str, value: bool):
         with self._connect() as con:
             con.execute(
