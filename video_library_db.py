@@ -7,7 +7,7 @@ from typing import Iterable
 
 
 class VideoLibraryDB:
-    """Small persistent SQLite index for VideoAudioScanner's Video Library."""
+    """Persistent SQLite index used by the Video Library."""
 
     def __init__(self, base_dir: str | Path | None = None):
         root = Path(base_dir) if base_dir else Path(__file__).resolve().parent
@@ -67,14 +67,21 @@ class VideoLibraryDB:
                 thumbnail_path, float(indexed_at),
             ))
 
-    def delete_missing(self, existing_paths: Iterable[str]):
-        paths = list(existing_paths)
+    def delete_missing_under_root(self, root: str | Path, existing_paths: Iterable[str]):
+        root_path = Path(root).resolve()
+        existing = {str(Path(p).resolve()) for p in existing_paths}
         with self._connect() as con:
-            if not paths:
-                con.execute("DELETE FROM videos")
-                return
-            placeholders = ",".join("?" for _ in paths)
-            con.execute(f"DELETE FROM videos WHERE path NOT IN ({placeholders})", paths)
+            rows = con.execute("SELECT path FROM videos").fetchall()
+            for row in rows:
+                stored = Path(row["path"])
+                try:
+                    inside = stored == root_path or root_path in stored.parents
+                    normalized = str(stored.resolve())
+                except (OSError, ValueError):
+                    inside = False
+                    normalized = str(stored)
+                if inside and normalized not in existing:
+                    con.execute("DELETE FROM videos WHERE path = ?", (row["path"],))
 
     def clear(self):
         with self._connect() as con:
