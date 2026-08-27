@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -64,12 +65,18 @@ class VideoLibraryDB:
              modified: float, metadata: dict | None = None,
              thumbnail_path: str = "", indexed_at: float = 0):
         with self._connect() as con:
-            old = con.execute("SELECT favorite, watched, watched_at FROM videos WHERE path = ?", (path,)).fetchone()
+            old = con.execute(
+                "SELECT favorite, watched, watched_at FROM videos WHERE path = ?",
+                (path,),
+            ).fetchone()
             favorite = int(old["favorite"]) if old else 0
             watched = int(old["watched"]) if old else 0
             watched_at = float(old["watched_at"]) if old else 0
             con.execute("""
-                INSERT INTO videos(path,name,extension,size,modified,metadata_json,thumbnail_path,indexed_at,favorite,watched,watched_at)
+                INSERT INTO videos(
+                    path,name,extension,size,modified,metadata_json,
+                    thumbnail_path,indexed_at,favorite,watched,watched_at
+                )
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(path) DO UPDATE SET
                     name=excluded.name,
@@ -87,15 +94,27 @@ class VideoLibraryDB:
 
     def set_favorite(self, path: str, value: bool):
         with self._connect() as con:
-            con.execute("UPDATE videos SET favorite = ? WHERE path = ?", (1 if value else 0, path))
+            con.execute(
+                "UPDATE videos SET favorite = ? WHERE path = ?",
+                (1 if value else 0, path),
+            )
 
     def set_watched(self, path: str, value: bool):
-        import time
         with self._connect() as con:
             con.execute(
                 "UPDATE videos SET watched = ?, watched_at = ? WHERE path = ?",
                 (1 if value else 0, time.time() if value else 0, path),
             )
+
+    def get_favorite_count(self) -> int:
+        with self._connect() as con:
+            row = con.execute("SELECT COUNT(*) AS count FROM videos WHERE favorite = 1").fetchone()
+            return int(row["count"])
+
+    def get_watched_count(self) -> int:
+        with self._connect() as con:
+            row = con.execute("SELECT COUNT(*) AS count FROM videos WHERE watched = 1").fetchone()
+            return int(row["count"])
 
     def delete_missing_under_root(self, root: str | Path, existing_paths: Iterable[str]):
         root_path = Path(root).resolve()
@@ -111,6 +130,20 @@ class VideoLibraryDB:
                     inside = False
                     normalized = str(stored)
                 if inside and normalized not in existing:
+                    con.execute("DELETE FROM videos WHERE path = ?", (row["path"],))
+
+    # Backwards-compatible alias for older Video Library code.
+    def delete_missing(self, existing_paths: Iterable[str]):
+        existing = {str(Path(p).resolve()) for p in existing_paths}
+        with self._connect() as con:
+            rows = con.execute("SELECT path FROM videos").fetchall()
+            for row in rows:
+                stored = Path(row["path"])
+                try:
+                    normalized = str(stored.resolve())
+                except (OSError, ValueError):
+                    normalized = str(stored)
+                if normalized not in existing:
                     con.execute("DELETE FROM videos WHERE path = ?", (row["path"],))
 
     def clear(self):
