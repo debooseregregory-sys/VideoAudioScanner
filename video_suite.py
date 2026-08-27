@@ -24,6 +24,7 @@ from video_converter import VideoConverterWindow
 from video_player import VideoPlayerWindow
 from storage_analyzer import StorageAnalyzerWindow
 from video_library import VideoLibraryWindow
+from thumbnail_tool import ThumbnailToolWindow
 
 
 class ModuleCard(QFrame):
@@ -110,6 +111,7 @@ class WizardWindow(QMainWindow):
             ("🔎", "Mijn bestanden analyseren", "Video- en audiobestanden technisch laten analyseren.", self.choose_scanner),
             ("💾", "Opslagruimte bekijken", "Ontdekken welke bestanden de meeste ruimte innemen.", self.choose_storage),
             ("📚", "Video Library", "Een visueel overzicht met thumbnails, zoeken en sorteren.", self.choose_library),
+            ("🖼", "Thumbnails maken", "Eén of meerdere thumbnails maken met voorbeeld, JPG/PNG en formaatkeuze.", self.choose_thumbnails),
         ]
 
         for index, choice in enumerate(choices):
@@ -198,6 +200,7 @@ class WizardWindow(QMainWindow):
     def choose_scanner(self): self.open_and_close(self.suite.open_scanner)
     def choose_storage(self): self.open_and_close(self.suite.open_storage)
     def choose_library(self): self.open_and_close(self.suite.open_library)
+    def choose_thumbnails(self): self.open_and_close(self.suite.open_thumbnails)
 
 
 class VideoSuiteWindow(QMainWindow):
@@ -212,6 +215,7 @@ class VideoSuiteWindow(QMainWindow):
         self.converter_window = None
         self.storage_window = None
         self.library_window = None
+        self.thumbnail_window = None
         self.wizard_window = None
         self.player_windows = []
 
@@ -281,8 +285,8 @@ class VideoSuiteWindow(QMainWindow):
             ("🔄", "VIDEO CONVERTER", "Zet video's om naar MP4, MKV of WebM. Je kunt H.264, H.265/HEVC, AV1 of kopiëren zonder hercodering kiezen.", "Video converteren", self.open_converter, True),
             ("💾", "STORAGE ANALYZER", "Analyseert opslaggebruik, toont de grootste bestanden en geeft een visuele preview van geselecteerde video's.", "Opslag analyseren", self.open_storage, True),
             ("📚", "VIDEO LIBRARY", "Een visuele bibliotheek met thumbnails, zoeken, sorteren en snel openen van je video's.", "Library openen", self.open_library, True),
-            ("🖼", "THUMBNAIL TOOL", "Maak thumbnails uit video's en gebruik ze bijvoorbeeld voor een overzicht of bibliotheek.", "Binnenkort", None, False),
-            ("🛠", "VIDEO TOOLS", "Extra gereedschap voor metadata, controle, bestandsonderhoud en videobeheer.", "Binnenkort", None, False),
+            ("🖼", "THUMBNAIL TOOL", "Maak één of meerdere thumbnails met een gekozen moment, voorbeeldweergave, JPG/PNG en optionele breedte.", "Thumbnail Tool openen", self.open_thumbnails, True),
+            ("🛠", "VIDEO TOOLS", "Extra gereedschap voor audio uit video, knippen, thumbnails, controle en streams.", "Video Tools openen", self.open_video_tools, True),
         ]
 
         for index, module in enumerate(modules):
@@ -359,6 +363,11 @@ class VideoSuiteWindow(QMainWindow):
     def open_converter(self): self._show_window("converter_window", lambda: VideoConverterWindow(self))
     def open_storage(self): self._show_window("storage_window", lambda: StorageAnalyzerWindow(self))
     def open_library(self): self._show_window("library_window", lambda: VideoLibraryWindow(self))
+    def open_thumbnails(self): self._show_window("thumbnail_window", lambda: ThumbnailToolWindow(self))
+
+    def open_video_tools(self):
+        from video_tools import VideoToolsWindow
+        self._show_window("video_tools_window", lambda: VideoToolsWindow(self))
 
     def open_player(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -394,6 +403,8 @@ class VideoSuiteWindow(QMainWindow):
             self.converter_window,
             self.storage_window,
             self.library_window,
+            self.thumbnail_window,
+            getattr(self, "video_tools_window", None),
             self.wizard_window,
         ):
             if window is not None:
