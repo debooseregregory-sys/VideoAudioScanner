@@ -1,35 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFileDialog,
-    QFormLayout,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QSplitter,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
+from video_library_db import VideoLibraryDB
 from video_player import VideoPlayerWindow
-
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v",
@@ -43,30 +32,16 @@ class VideoItem:
     name: str
     size: int
     extension: str
+    modified: float = 0.0
+    metadata: dict | None = None
 
 
-class ThumbnailSignals(QObject):
-    finished = Signal(str, object)
-
-
-class ThumbnailTask(QRunnable):
-    def __init__(self, path: str, signals: ThumbnailSignals):
-        super().__init__()
-        self.path = path
-        self.signals = signals
-        self.setAutoDelete(True)
-
-    def run(self):
-        pixmap = make_thumbnail(self.path)
-        self.signals.finished.emit(self.path, pixmap)
-
-
-class MetadataSignals(QObject):
+class WorkerSignals(QObject):
     finished = Signal(str, object)
 
 
 class MetadataTask(QRunnable):
-    def __init__(self, path: str, signals: MetadataSignals):
+    def __init__(self, path: str, signals: WorkerSignals):
         super().__init__()
         self.path = path
         self.signals = signals
@@ -76,8 +51,32 @@ class MetadataTask(QRunnable):
         self.signals.finished.emit(self.path, read_metadata(self.path))
 
 
+class ThumbnailTask(QRunnable):
+    def __init__(self, path: str, cache_path: str, signals: WorkerSignals):
+        super().__init__()
+        self.path = path
+        self.cache_path = cache_path
+        self.signals = signals
+        self.setAutoDelete(True)
+
+    def run(self):
+        pixmap = None
+        if os.path.isfile(self.cache_path):
+            cached = QPixmap(self.cache_path)
+            if not cached.isNull():
+                pixmap = cached
+        if pixmap is None:
+            pixmap = make_thumbnail(self.path)
+            if pixmap and not pixmap.isNull():
+                try:
+                    pixmap.save(self.cache_path, "JPG", 88)
+                except Exception:
+                    pass
+        self.signals.finished.emit(self.path, pixmap)
+
+
 class VideoCard(QFrame):
-    def __init__(self, item: VideoItem, select_callback, open_callback, parent=None):
+    def __init__(self, item, select_callback, open_callback, parent=None):
         super().__init__(parent)
         self.item = item
         self.select_callback = select_callback
@@ -95,10 +94,6 @@ class VideoCard(QFrame):
         self.preview.setObjectName("libraryPreview")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setFixedHeight(145)
-        self.preview.setMinimumWidth(220)
-        self.preview.setStyleSheet(
-            "font-size: 14px; color: #7f8793; background: #0d1015;"
-        )
         layout.addWidget(self.preview)
 
         title = QLabel(item.name)
@@ -116,23 +111,17 @@ class VideoCard(QFrame):
         path_label.setWordWrap(True)
         layout.addWidget(path_label, 1)
 
-    def set_thumbnail(self, thumbnail: QPixmap | None):
-        if thumbnail and not thumbnail.isNull():
-            self.preview.setStyleSheet("background: #0d1015; border-radius: 7px;")
-            self.preview.setPixmap(
-                thumbnail.scaled(
-                    QSize(330, 145),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+    def set_thumbnail(self, pixmap):
+        if pixmap and not pixmap.isNull():
+            self.preview.setText("")
+            self.preview.setPixmap(pixmap.scaled(
+                QSize(330, 145), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
         else:
             self.preview.setText("▶")
-            self.preview.setStyleSheet(
-                "font-size: 42px; color: #5d8fd0; background: #0d1015;"
-            )
+            self.preview.setStyleSheet("font-size:42px;color:#5d8fd0;background:#0d1015;")
 
-    def set_selected(self, selected: bool):
+    def set_selected(self, selected):
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -157,16 +146,14 @@ def format_size(value: int) -> str:
     return f"{value} B"
 
 
-def format_duration(seconds) -> str:
+def format_duration(value) -> str:
     try:
-        total = max(0, int(float(seconds)))
+        total = max(0, int(float(value)))
     except (TypeError, ValueError):
         return "—"
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
+    h, r = divmod(total, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 def format_rate(value) -> str:
@@ -186,9 +173,9 @@ def format_fps(value: str) -> str:
         return "—"
     if "/" in value:
         try:
-            num, den = value.split("/", 1)
-            if float(den) != 0:
-                return f"{float(num) / float(den):.3f} FPS"
+            a, b = value.split("/", 1)
+            if float(b):
+                return f"{float(a) / float(b):.3f} FPS"
         except (ValueError, ZeroDivisionError):
             pass
     return value
@@ -199,21 +186,12 @@ def read_metadata(path: str) -> dict:
     if not ffprobe:
         return {"error": "FFprobe niet gevonden."}
     try:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v", "error",
-                "-show_entries",
-                "format=duration,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,r_frame_rate,channels,sample_rate,bit_rate",
-                "-of", "json",
-                path,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=15,
-            check=False,
-        )
-        if result.returncode != 0:
+        result = subprocess.run([
+            ffprobe, "-v", "error", "-show_entries",
+            "format=duration,bit_rate,format_name:stream=index,codec_type,codec_name,width,height,r_frame_rate,channels,sample_rate,bit_rate",
+            "-of", "json", path,
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, check=False)
+        if result.returncode:
             return {"error": result.stderr.decode("utf-8", "replace").strip() or "FFprobe kon het bestand niet lezen."}
         return json.loads(result.stdout.decode("utf-8", "replace"))
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
@@ -225,24 +203,41 @@ def make_thumbnail(path: str) -> QPixmap | None:
     if not ffmpeg:
         return None
     try:
-        result = subprocess.run(
-            [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", "00:00:03",
-                "-i", path, "-frames:v", "1", "-vf", "scale=640:-2",
-                "-f", "image2", "pipe:1",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=12,
-            check=False,
-        )
-        if result.returncode != 0 or not result.stdout:
+        result = subprocess.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", "00:00:03",
+            "-i", path, "-frames:v", "1", "-vf", "scale=640:-2",
+            "-f", "image2", "pipe:1",
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
+        if result.returncode or not result.stdout:
             return None
         pixmap = QPixmap()
         pixmap.loadFromData(result.stdout, "JPEG")
         return pixmap if not pixmap.isNull() else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def resolution_label(meta: dict) -> str:
+    streams = meta.get("streams", []) if isinstance(meta, dict) else []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    w, h = video.get("width"), video.get("height")
+    if not w or not h:
+        return "Onbekend"
+    if h >= 2160:
+        return "4K"
+    if h >= 1440:
+        return "1440p"
+    if h >= 1080:
+        return "1080p"
+    if h >= 720:
+        return "720p"
+    return "SD"
+
+
+def video_codec(meta: dict) -> str:
+    streams = meta.get("streams", []) if isinstance(meta, dict) else []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    return str(video.get("codec_name") or "").lower()
 
 
 class VideoLibraryWindow(QMainWindow):
@@ -253,17 +248,19 @@ class VideoLibraryWindow(QMainWindow):
         self.items: list[VideoItem] = []
         self.folder = ""
         self.cards: list[VideoCard] = []
-        self.card_by_path: dict[str, VideoCard] = {}
+        self.card_by_path = {}
         self.selected_path = ""
-        self.metadata_cache: dict[str, dict] = {}
-        self.thumbnail_signals = ThumbnailSignals()
-        self.thumbnail_signals.finished.connect(self._thumbnail_finished)
-        self.metadata_signals = MetadataSignals()
+        self.metadata_cache = {}
+        self.db = VideoLibraryDB()
+        self.pool = QThreadPool(self)
+        self.metadata_signals = WorkerSignals()
         self.metadata_signals.finished.connect(self._metadata_finished)
-        self.thread_pool = QThreadPool(self)
-        self.player_windows: list[VideoPlayerWindow] = []
+        self.thumbnail_signals = WorkerSignals()
+        self.thumbnail_signals.finished.connect(self._thumbnail_finished)
+        self.player_windows = []
         self.thumbnail_total = 0
         self.thumbnail_done = 0
+        self.metadata_pending = 0
         self._build_ui()
         self._apply_theme()
 
@@ -274,49 +271,56 @@ class VideoLibraryWindow(QMainWindow):
         layout.setSpacing(14)
 
         header = QHBoxLayout()
-        title_box = QVBoxLayout()
+        box = QVBoxLayout()
         title = QLabel("VIDEO LIBRARY")
         title.setObjectName("libraryHeader")
-        title_box.addWidget(title)
-        subtitle = QLabel("Visueel overzicht, metadata en afspelen vanuit één bibliotheek")
+        box.addWidget(title)
+        subtitle = QLabel("Je centrale bibliotheek voor zoeken, previews, metadata en afspelen")
         subtitle.setObjectName("librarySubtitle")
-        title_box.addWidget(subtitle)
-        header.addLayout(title_box)
+        box.addWidget(subtitle)
+        header.addLayout(box)
         header.addStretch(1)
-        self.stats = QLabel("Nog geen map gescand")
+        self.stats = QLabel("Nog geen index")
         self.stats.setObjectName("libraryStats")
         header.addWidget(self.stats)
         layout.addLayout(header)
 
         controls = QHBoxLayout()
-        choose = QPushButton("Map kiezen")
+        choose = QPushButton("📁  Map kiezen")
         choose.clicked.connect(self.choose_folder)
         controls.addWidget(choose)
-
-        self.scan_button = QPushButton("Scan starten")
+        self.scan_button = QPushButton("▶  Index bijwerken")
         self.scan_button.setObjectName("primary")
         self.scan_button.setEnabled(False)
         self.scan_button.clicked.connect(self.scan)
         controls.addWidget(self.scan_button)
-
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Zoeken op bestandsnaam of pad…")
+        self.search.setPlaceholderText("Zoek op bestandsnaam of pad…")
         self.search.textChanged.connect(self.refresh_cards)
         controls.addWidget(self.search, 1)
-
+        self.resolution_box = QComboBox()
+        self.resolution_box.addItems(["Alle resoluties", "4K", "1440p", "1080p", "720p", "SD"])
+        self.resolution_box.currentIndexChanged.connect(self.refresh_cards)
+        controls.addWidget(self.resolution_box)
+        self.codec_box = QComboBox()
+        self.codec_box.addItems(["Alle codecs", "H.264", "HEVC", "AV1"])
+        self.codec_box.currentIndexChanged.connect(self.refresh_cards)
+        controls.addWidget(self.codec_box)
         self.sort_box = QComboBox()
-        self.sort_box.addItems(["Naam", "Grootte — groot naar klein", "Grootte — klein naar groot"])
+        self.sort_box.addItems([
+            "Naam A → Z", "Grootste eerst", "Kleinste eerst",
+            "Langste eerst", "Kortste eerst", "Nieuwste eerst", "Oudste eerst",
+        ])
         self.sort_box.currentIndexChanged.connect(self.refresh_cards)
         controls.addWidget(self.sort_box)
         layout.addLayout(controls)
 
-        self.folder_label = QLabel("Kies een map en klik daarna op Scan starten.")
+        self.folder_label = QLabel("Kies een map en klik daarna op Index bijwerken.")
         self.folder_label.setObjectName("libraryFolder")
         layout.addWidget(self.folder_label)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.container = QWidget()
@@ -329,26 +333,21 @@ class VideoLibraryWindow(QMainWindow):
 
         details = QFrame()
         details.setObjectName("detailsPanel")
-        details.setMinimumWidth(350)
-        details_layout = QVBoxLayout(details)
-        details_layout.setContentsMargins(16, 16, 16, 16)
-        details_layout.setSpacing(10)
-
+        details.setMinimumWidth(370)
+        dl = QVBoxLayout(details)
+        dl.setContentsMargins(16, 16, 16, 16)
+        dl.setSpacing(9)
         self.detail_preview = QLabel("Selecteer een video")
         self.detail_preview.setObjectName("detailPreview")
         self.detail_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail_preview.setMinimumHeight(190)
-        details_layout.addWidget(self.detail_preview)
-
+        dl.addWidget(self.detail_preview)
         self.detail_title = QLabel("Geen video geselecteerd")
         self.detail_title.setObjectName("detailTitle")
         self.detail_title.setWordWrap(True)
-        details_layout.addWidget(self.detail_title)
-
-        self.detail_form = QFormLayout()
-        self.detail_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.detail_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        self.detail_labels: dict[str, QLabel] = {}
+        dl.addWidget(self.detail_title)
+        form = QFormLayout()
+        self.detail_labels = {}
         for key, label in [
             ("size", "Grootte"), ("duration", "Duur"), ("resolution", "Resolutie"),
             ("video_codec", "Video codec"), ("fps", "FPS"), ("video_bitrate", "Video bitrate"),
@@ -356,38 +355,31 @@ class VideoLibraryWindow(QMainWindow):
             ("sample_rate", "Sample rate"), ("container", "Container"),
         ]:
             value = QLabel("—")
-            value.setWordWrap(True)
             value.setObjectName("detailValue")
+            value.setWordWrap(True)
             self.detail_labels[key] = value
-            self.detail_form.addRow(label + ":", value)
-        details_layout.addLayout(self.detail_form)
-
+            form.addRow(label + ":", value)
+        dl.addLayout(form)
         self.detail_path = QLabel("")
         self.detail_path.setObjectName("detailPath")
         self.detail_path.setWordWrap(True)
-        details_layout.addWidget(self.detail_path)
-
-        details_layout.addStretch(1)
-        actions = QVBoxLayout()
+        dl.addWidget(self.detail_path)
+        dl.addStretch(1)
         self.play_button = QPushButton("▶  Afspelen in Video Suite Player")
         self.play_button.setObjectName("primary")
         self.play_button.setEnabled(False)
         self.play_button.clicked.connect(self.play_selected)
-        actions.addWidget(self.play_button)
-
+        dl.addWidget(self.play_button)
         self.folder_button = QPushButton("📁  Map openen")
         self.folder_button.setEnabled(False)
         self.folder_button.clicked.connect(self.open_selected_folder)
-        actions.addWidget(self.folder_button)
-
+        dl.addWidget(self.folder_button)
         self.analyze_button = QPushButton("🔎  Openen in Media Scanner")
         self.analyze_button.setEnabled(False)
         self.analyze_button.clicked.connect(self.analyze_selected)
-        actions.addWidget(self.analyze_button)
-        details_layout.addLayout(actions)
-
+        dl.addWidget(self.analyze_button)
         splitter.addWidget(details)
-        splitter.setSizes([1020, 400])
+        splitter.setSizes([1040, 390])
         layout.addWidget(splitter, 1)
 
         self.status = QLabel("Gereed")
@@ -396,35 +388,33 @@ class VideoLibraryWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _apply_theme(self):
-        self.setStyleSheet(
-            """
-            QWidget { background: #111318; color: #e8eaed; font-size: 13px; }
-            QMainWindow { background: #0d0f13; }
-            QLabel#libraryHeader { font-size: 30px; font-weight: 900; color: #fff; }
-            QLabel#librarySubtitle, QLabel#libraryStatus { color: #8f96a3; }
-            QLabel#libraryStats { color: #fff; font-weight: 800; background: #191c22; border: 1px solid #303640; border-radius: 8px; padding: 10px 14px; }
-            QLabel#libraryFolder { color: #aeb5c0; background: #15181d; border: 1px solid #2d323a; border-radius: 7px; padding: 9px 12px; }
-            QLineEdit, QComboBox { background: #1e2127; border: 1px solid #353a43; border-radius: 7px; padding: 8px 10px; }
-            QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 7px; padding: 9px 14px; font-weight: 600; }
-            QPushButton:hover { background: #353b45; }
-            QPushButton#primary { background: #315f9e; border-color: #4679bd; color: #fff; }
-            QPushButton#primary:hover { background: #3b70b6; }
-            QPushButton:disabled { color: #666c75; background: #202329; }
-            QScrollArea { border: 0; background: #111318; }
-            QFrame#libraryCard { background: #191c22; border: 1px solid #303640; border-radius: 10px; }
-            QFrame#libraryCard:hover { border: 1px solid #5686c4; background: #1c2027; }
-            QFrame#libraryCard[selected="true"] { border: 2px solid #5d8fd0; background: #1d2632; }
-            QLabel#libraryPreview { background: #0d1015; border-radius: 7px; }
-            QLabel#libraryTitle { font-size: 15px; font-weight: 800; color: #fff; }
-            QLabel#libraryMeta { color: #6f9bd0; font-weight: 700; }
-            QLabel#libraryPath { color: #777f8c; font-size: 11px; }
-            QFrame#detailsPanel { background: #171a20; border: 1px solid #303640; border-radius: 10px; }
-            QLabel#detailPreview { background: #0b0d11; border: 1px solid #303640; border-radius: 8px; color: #6f7784; }
-            QLabel#detailTitle { color: #fff; font-size: 18px; font-weight: 800; }
-            QLabel#detailValue { color: #e8eaed; }
-            QLabel#detailPath { color: #777f8c; font-size: 11px; padding-top: 6px; }
-            """
-        )
+        self.setStyleSheet("""
+            QWidget { background:#111318; color:#e8eaed; font-size:13px; }
+            QMainWindow { background:#0d0f13; }
+            QLabel#libraryHeader { font-size:30px; font-weight:900; color:#fff; }
+            QLabel#librarySubtitle,#libraryStatus { color:#8f96a3; }
+            QLabel#libraryStats { color:#fff; font-weight:800; background:#191c22; border:1px solid #303640; border-radius:8px; padding:10px 14px; }
+            QLabel#libraryFolder { color:#aeb5c0; background:#15181d; border:1px solid #2d323a; border-radius:7px; padding:9px 12px; }
+            QLineEdit,QComboBox { background:#1e2127; border:1px solid #353a43; border-radius:7px; padding:8px 10px; }
+            QPushButton { background:#292e36; border:1px solid #3c424c; border-radius:7px; padding:9px 14px; font-weight:600; }
+            QPushButton:hover { background:#353b45; }
+            QPushButton#primary { background:#315f9e; border-color:#4679bd; color:#fff; }
+            QPushButton#primary:hover { background:#3b70b6; }
+            QPushButton:disabled { color:#666c75; background:#202329; }
+            QScrollArea { border:0; background:#111318; }
+            QFrame#libraryCard { background:#191c22; border:1px solid #303640; border-radius:10px; }
+            QFrame#libraryCard:hover { border:1px solid #5686c4; background:#1c2027; }
+            QFrame#libraryCard[selected="true"] { border:2px solid #5d8fd0; background:#1d2632; }
+            QLabel#libraryPreview { background:#0d1015; border-radius:7px; }
+            QLabel#libraryTitle { font-size:15px; font-weight:800; color:#fff; }
+            QLabel#libraryMeta { color:#6f9bd0; font-weight:700; }
+            QLabel#libraryPath { color:#777f8c; font-size:11px; }
+            QFrame#detailsPanel { background:#171a20; border:1px solid #303640; border-radius:10px; }
+            QLabel#detailPreview { background:#0b0d11; border:1px solid #303640; border-radius:8px; color:#6f7784; }
+            QLabel#detailTitle { color:#fff; font-size:18px; font-weight:800; }
+            QLabel#detailValue { color:#e8eaed; }
+            QLabel#detailPath { color:#777f8c; font-size:11px; }
+        """)
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Kies videomap", self.folder or "")
@@ -433,50 +423,95 @@ class VideoLibraryWindow(QMainWindow):
         self.folder = folder
         self.folder_label.setText(folder)
         self.scan_button.setEnabled(True)
-        self.status.setText("Map gekozen. Klik op Scan starten.")
+        self.status.setText("Map gekozen. Klik op Index bijwerken.")
+        self.load_index_for_folder()
+
+    def load_index_for_folder(self):
+        root = Path(self.folder).resolve()
+        items = []
+        for row in self.db.all():
+            try:
+                path = Path(row["path"]).resolve()
+            except Exception:
+                continue
+            if path == root or root in path.parents:
+                items.append(VideoItem(
+                    str(path), row["name"], int(row["size"]), row["extension"],
+                    float(row["modified"]), self.db.metadata(row),
+                ))
+        self.items = items
+        if items:
+            total = sum(i.size for i in items)
+            self.stats.setText(f"{len(items):,} video's  •  {format_size(total)}  •  index geladen")
+            self.refresh_cards()
+            self._start_thumbnails()
 
     def scan(self):
         if not self.folder or not os.path.isdir(self.folder):
             QMessageBox.warning(self, "Video Library", "Kies eerst een geldige videomap.")
             return
-        self.status.setText("Video's zoeken…")
         self.scan_button.setEnabled(False)
-        self.items = []
-        self.selected_path = ""
-        self.clear_details()
-        self.refresh_cards()
+        self.status.setText("Nieuwe en gewijzigde video's zoeken…")
         QApplication.processEvents()
-        items: list[VideoItem] = []
+        found = []
+        existing = set()
         try:
             for path in Path(self.folder).rglob("*"):
                 if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
                     continue
                 try:
                     stat = path.stat()
-                    items.append(VideoItem(str(path), path.name, stat.st_size, path.suffix.lower()))
                 except OSError:
                     continue
+                p = str(path.resolve())
+                existing.add(p)
+                row = self.db.get(p)
+                metadata = self.db.metadata(row) if row else {}
+                unchanged = bool(row and int(row["size"]) == stat.st_size and float(row["modified"]) == stat.st_mtime)
+                found.append(VideoItem(p, path.name, stat.st_size, path.suffix.lower(), stat.st_mtime, metadata if unchanged else {}))
+                if not unchanged:
+                    self.pool.start(MetadataTask(p, self.metadata_signals))
         except OSError as exc:
             QMessageBox.critical(self, "Video Library", str(exc))
-        self.items = items
-        self.scan_button.setEnabled(True)
+        self.db.delete_missing(existing)
+        self.items = found
+        self.selected_path = ""
+        self.clear_details()
         self.refresh_cards()
-        total = sum(i.size for i in items)
-        self.stats.setText(f"{len(items):,} video's  •  {format_size(total)}")
-        self.status.setText(f"Scan klaar: {len(items):,} video's gevonden. Preview's worden geladen…")
-        QApplication.processEvents()
-        self._start_thumbnail_loading()
+        self.scan_button.setEnabled(True)
+        total = sum(i.size for i in found)
+        self.stats.setText(f"{len(found):,} video's  •  {format_size(total)}")
+        self.status.setText("Index bijgewerkt. Metadata wordt op de achtergrond verwerkt…")
+        self._start_thumbnails()
 
-    def _visible_items(self) -> list[VideoItem]:
+    def _visible_items(self):
         query = self.search.text().casefold().strip()
-        items = [i for i in self.items if not query or query in i.name.casefold() or query in i.path.casefold()]
-        if self.sort_box.currentIndex() == 1:
-            items.sort(key=lambda i: i.size, reverse=True)
-        elif self.sort_box.currentIndex() == 2:
-            items.sort(key=lambda i: i.size)
-        else:
-            items.sort(key=lambda i: i.name.casefold())
-        return items
+        resolution = self.resolution_box.currentText()
+        codec_filter = self.codec_box.currentText()
+        result = []
+        for item in self.items:
+            if query and query not in item.name.casefold() and query not in item.path.casefold():
+                continue
+            meta = item.metadata or {}
+            if resolution != "Alle resoluties" and resolution_label(meta) != resolution:
+                continue
+            codec = video_codec(meta)
+            if codec_filter == "H.264" and codec not in {"h264", "avc", "avc1"}:
+                continue
+            if codec_filter == "HEVC" and codec not in {"hevc", "h265"}:
+                continue
+            if codec_filter == "AV1" and codec != "av1":
+                continue
+            result.append(item)
+        idx = self.sort_box.currentIndex()
+        if idx == 1: result.sort(key=lambda x: x.size, reverse=True)
+        elif idx == 2: result.sort(key=lambda x: x.size)
+        elif idx == 3: result.sort(key=lambda x: float((x.metadata or {}).get("format", {}).get("duration") or 0), reverse=True)
+        elif idx == 4: result.sort(key=lambda x: float((x.metadata or {}).get("format", {}).get("duration") or 0))
+        elif idx == 5: result.sort(key=lambda x: x.modified, reverse=True)
+        elif idx == 6: result.sort(key=lambda x: x.modified)
+        else: result.sort(key=lambda x: x.name.casefold())
+        return result
 
     def refresh_cards(self):
         for card in self.cards:
@@ -485,9 +520,8 @@ class VideoLibraryWindow(QMainWindow):
         self.card_by_path.clear()
         while self.grid.count():
             item = self.grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+            if item.widget():
+                item.widget().deleteLater()
         items = self._visible_items()
         for index, item in enumerate(items):
             card = VideoCard(item, self.select_video, self.open_video, self.container)
@@ -495,90 +529,106 @@ class VideoLibraryWindow(QMainWindow):
             self.cards.append(card)
             self.card_by_path[item.path] = card
             self.grid.addWidget(card, index // 3, index % 3)
-        rows = max(1, (len(items) + 2) // 3)
-        self.grid.setRowStretch(rows, 1)
+        self.grid.setRowStretch(max(1, (len(items) + 2) // 3), 1)
+        self.status.setText(f"Weergave: {len(items):,} van {len(self.items):,} video's")
 
-    def _start_thumbnail_loading(self):
-        self.thumbnail_total = len(self.card_by_path)
+    def _thumb_cache_path(self, path):
+        root = Path(self.folder or Path(path).parent)
+        cache_dir = root / ".video_suite_thumbnails"
+        try:
+            cache_dir.mkdir(exist_ok=True)
+        except OSError:
+            cache_dir = Path(__file__).resolve().parent / "data" / "video_thumbnails"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha1(path.encode("utf-8", "ignore")).hexdigest()
+        return str(cache_dir / f"{key}.jpg")
+
+    def _start_thumbnails(self):
+        paths = list(self.card_by_path)
+        self.thumbnail_total = len(paths)
         self.thumbnail_done = 0
-        if self.thumbnail_total == 0:
-            self.status.setText("Geen video's gevonden.")
+        if not paths:
             return
-        self.status.setText(f"Preview's laden: 0 / {self.thumbnail_total}")
-        self.thread_pool.clear()
-        for path in self.card_by_path:
-            self.thread_pool.start(ThumbnailTask(path, self.thumbnail_signals))
+        self.status.setText(f"Preview's laden: 0 / {len(paths):,}")
+        self.pool.clear()
+        for path in paths:
+            self.pool.start(ThumbnailTask(path, self._thumb_cache_path(path), self.thumbnail_signals))
 
-    def _thumbnail_finished(self, path: str, thumbnail):
+    def _thumbnail_finished(self, path, pixmap):
         self.thumbnail_done += 1
         card = self.card_by_path.get(path)
-        if card is not None:
-            card.set_thumbnail(thumbnail)
+        if card:
+            card.set_thumbnail(pixmap)
+        if path == self.selected_path and pixmap and not pixmap.isNull():
+            self.detail_preview.setText("")
+            self.detail_preview.setPixmap(pixmap.scaled(500, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         if self.thumbnail_done >= self.thumbnail_total:
-            self.status.setText(f"Klaar: {len(self.items):,} video's • {self.thumbnail_total:,} previews geladen.")
-        else:
-            self.status.setText(f"Preview's laden: {self.thumbnail_done} / {self.thumbnail_total}")
+            self.status.setText(f"Klaar: {len(self.items):,} video's • previews geladen")
 
-    def select_video(self, path: str):
+    def select_video(self, path):
         if not os.path.isfile(path):
             return
         self.selected_path = path
-        for item_path, card in self.card_by_path.items():
-            card.set_selected(item_path == path)
+        for p, card in self.card_by_path.items():
+            card.set_selected(p == path)
         self.show_details(path)
 
-    def show_details(self, path: str):
-        item = next((i for i in self.items if i.path == path), None)
-        if item is None:
+    def show_details(self, path):
+        item = next((x for x in self.items if x.path == path), None)
+        if not item:
             return
         self.detail_title.setText(item.name)
         self.detail_path.setText(item.path)
         self.detail_labels["size"].setText(format_size(item.size))
         self.detail_labels["container"].setText(item.extension.upper().lstrip("."))
+        meta = item.metadata or {}
+        if meta and not meta.get("error"):
+            self._fill_details(meta, path)
+        else:
+            self.detail_labels["duration"].setText("Metadata wordt geladen…")
+            self.pool.start(MetadataTask(path, self.metadata_signals))
+        card = self.card_by_path.get(path)
+        if card and card.preview.pixmap() and not card.preview.pixmap().isNull():
+            self.detail_preview.setText("")
+            self.detail_preview.setPixmap(card.preview.pixmap().scaled(500, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.detail_preview.setText("Preview laden…")
         self.play_button.setEnabled(True)
         self.folder_button.setEnabled(True)
         self.analyze_button.setEnabled(True)
-        self.detail_preview.setText("Metadata laden…")
-        self.detail_preview.setPixmap(QPixmap())
-        self.metadata_cache.pop(path, None)
-        self.thread_pool.start(MetadataTask(path, self.metadata_signals))
-        thumb = self.card_by_path.get(path)
-        if thumb is not None and thumb.preview.pixmap() is not None:
-            pix = thumb.preview.pixmap()
-            if pix and not pix.isNull():
-                self.detail_preview.setText("")
-                self.detail_preview.setPixmap(pix.scaled(500, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
-    def _metadata_finished(self, path: str, data: dict):
-        if path != self.selected_path:
-            return
-        self.metadata_cache[path] = data
-        if data.get("error"):
-            self.detail_preview.setText("Preview beschikbaar • FFprobe: fout")
-            self.status.setText(f"FFprobe: {data['error']}")
-            return
+    def _fill_details(self, data, path):
         streams = data.get("streams", [])
         video = next((s for s in streams if s.get("codec_type") == "video"), {})
         audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
         fmt = data.get("format", {})
-        resolution = "—"
-        if video.get("width") and video.get("height"):
-            resolution = f"{video['width']} × {video['height']}"
+        res = f"{video.get('width')} × {video.get('height')}" if video.get("width") and video.get("height") else "—"
         self.detail_labels["duration"].setText(format_duration(fmt.get("duration")))
-        self.detail_labels["resolution"].setText(resolution)
+        self.detail_labels["resolution"].setText(res)
         self.detail_labels["video_codec"].setText(str(video.get("codec_name") or "—").upper())
         self.detail_labels["fps"].setText(format_fps(str(video.get("r_frame_rate") or "")))
-        self.detail_labels["video_bitrate"].setText(format_rate(video.get("bit_rate")))
+        self.detail_labels["video_bitrate"].setText(format_rate(video.get("bit_rate") or fmt.get("bit_rate")))
         self.detail_labels["audio_codec"].setText(str(audio.get("codec_name") or "—").upper())
-        channels = audio.get("channels")
-        self.detail_labels["channels"].setText(str(channels) if channels else "—")
-        self.detail_labels["sample_rate"].setText(f"{audio['sample_rate']} Hz" if audio.get("sample_rate") else "—")
-        self.detail_labels["container"].setText(str(fmt.get("format_name") or self._extension_for(path)).upper())
-        self.detail_preview.setText("")
-        self.status.setText("Metadata geladen.")
+        self.detail_labels["channels"].setText(str(audio.get("channels") or "—"))
+        self.detail_labels["sample_rate"].setText(f"{audio.get('sample_rate')} Hz" if audio.get("sample_rate") else "—")
+        self.detail_labels["container"].setText(str(fmt.get("format_name") or Path(path).suffix).upper())
 
-    def _extension_for(self, path: str) -> str:
-        return Path(path).suffix.lstrip(".") or "—"
+    def _metadata_finished(self, path, data):
+        item = next((x for x in self.items if x.path == path), None)
+        if not item:
+            return
+        item.metadata = data
+        try:
+            self.db.save(path=item.path, name=item.name, extension=item.extension, size=item.size,
+                          modified=item.modified, metadata=data, indexed_at=time.time())
+        except Exception:
+            pass
+        if path == self.selected_path:
+            if data.get("error"):
+                self.status.setText(f"FFprobe: {data['error']}")
+            else:
+                self._fill_details(data, path)
+        self.refresh_cards()
 
     def clear_details(self):
         self.detail_title.setText("Geen video geselecteerd")
@@ -595,11 +645,11 @@ class VideoLibraryWindow(QMainWindow):
         if self.selected_path:
             self.open_video(self.selected_path)
 
-    def open_video(self, path: str):
+    def open_video(self, path):
         if not os.path.isfile(path):
-            QMessageBox.warning(self, "Video openen", "Het videobestand bestaat niet meer.")
+            QMessageBox.warning(self, "Video Player", "Het videobestand bestaat niet meer.")
             return
-        playlist = [item.path for item in self._visible_items() if os.path.isfile(item.path)]
+        playlist = [x.path for x in self._visible_items() if os.path.isfile(x.path)]
         if path not in playlist:
             playlist.insert(0, path)
         try:
@@ -613,9 +663,8 @@ class VideoLibraryWindow(QMainWindow):
             QMessageBox.critical(self, "Video Player", f"De ingebouwde speler kon niet worden geopend:\n\n{exc}")
 
     def open_selected_folder(self):
-        if not self.selected_path:
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.selected_path).parent)))
+        if self.selected_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.selected_path).parent)))
 
     def analyze_selected(self):
         if not self.selected_path:
@@ -623,7 +672,6 @@ class VideoLibraryWindow(QMainWindow):
         try:
             from main import MainWindow as ScannerWindow
             window = ScannerWindow()
-            window.folder.setText(str(Path(self.selected_path).parent))
             window.show()
             window.raise_()
             window.activateWindow()
@@ -632,15 +680,15 @@ class VideoLibraryWindow(QMainWindow):
             QMessageBox.critical(self, "Media Scanner", f"De Media Scanner kon niet worden geopend:\n\n{exc}")
 
     def closeEvent(self, event):
-        self.thread_pool.clear()
-        self.thread_pool.waitForDone(1500)
+        self.pool.clear()
+        self.pool.waitForDone(1500)
         for window in list(self.player_windows):
             try:
                 window.close()
             except RuntimeError:
                 pass
         scanner = getattr(self, "_scanner_window", None)
-        if scanner is not None:
+        if scanner:
             try:
                 scanner.close()
             except RuntimeError:
