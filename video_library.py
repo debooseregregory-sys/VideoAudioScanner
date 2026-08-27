@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from video_player import VideoPlayerWindow
+
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v",
@@ -177,6 +179,7 @@ class VideoLibraryWindow(QMainWindow):
         self.thumbnail_signals = ThumbnailSignals()
         self.thumbnail_signals.finished.connect(self._thumbnail_finished)
         self.thread_pool = QThreadPool(self)
+        self.player_windows: list[VideoPlayerWindow] = []
         self.thumbnail_total = 0
         self.thumbnail_done = 0
         self._build_ui()
@@ -323,8 +326,24 @@ class VideoLibraryWindow(QMainWindow):
             f"Scan klaar: {len(items):,} video's gevonden. Preview's worden geladen…"
         )
         QApplication.processEvents()
-
         self._start_thumbnail_loading()
+
+    def _visible_items(self) -> list[VideoItem]:
+        query = self.search.text().casefold().strip()
+        items = [
+            i
+            for i in self.items
+            if not query
+            or query in i.name.casefold()
+            or query in i.path.casefold()
+        ]
+        if self.sort_box.currentIndex() == 1:
+            items.sort(key=lambda i: i.size, reverse=True)
+        elif self.sort_box.currentIndex() == 2:
+            items.sort(key=lambda i: i.size)
+        else:
+            items.sort(key=lambda i: i.name.casefold())
+        return items
 
     def refresh_cards(self):
         for card in self.cards:
@@ -337,22 +356,7 @@ class VideoLibraryWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
 
-        query = self.search.text().casefold().strip()
-        items = [
-            i
-            for i in self.items
-            if not query
-            or query in i.name.casefold()
-            or query in i.path.casefold()
-        ]
-
-        if self.sort_box.currentIndex() == 1:
-            items.sort(key=lambda i: i.size, reverse=True)
-        elif self.sort_box.currentIndex() == 2:
-            items.sort(key=lambda i: i.size)
-        else:
-            items.sort(key=lambda i: i.name.casefold())
-
+        items = self._visible_items()
         for index, item in enumerate(items):
             card = VideoCard(item, self.open_video, self.container)
             self.cards.append(card)
@@ -365,15 +369,10 @@ class VideoLibraryWindow(QMainWindow):
     def _start_thumbnail_loading(self):
         self.thumbnail_total = len(self.card_by_path)
         self.thumbnail_done = 0
-
         if self.thumbnail_total == 0:
             self.status.setText("Geen video's gevonden.")
             return
-
-        self.status.setText(
-            f"Preview's laden: 0 / {self.thumbnail_total}"
-        )
-
+        self.status.setText(f"Preview's laden: 0 / {self.thumbnail_total}")
         self.thread_pool.clear()
         for path in self.card_by_path:
             self.thread_pool.start(ThumbnailTask(path, self.thumbnail_signals))
@@ -383,7 +382,6 @@ class VideoLibraryWindow(QMainWindow):
         card = self.card_by_path.get(path)
         if card is not None:
             card.set_thumbnail(thumbnail)
-
         if self.thumbnail_done >= self.thumbnail_total:
             self.status.setText(
                 f"Klaar: {len(self.items):,} video's • {self.thumbnail_total:,} previews geladen."
@@ -394,21 +392,44 @@ class VideoLibraryWindow(QMainWindow):
             )
 
     def open_video(self, path: str):
+        """Open de video in de ingebouwde Video Suite Player met de huidige Library-weergave als playlist."""
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Video openen", "Het videobestand bestaat niet meer.")
+            return
+
+        playlist = [item.path for item in self._visible_items() if os.path.isfile(item.path)]
+        if path not in playlist:
+            playlist.insert(0, path)
+
         try:
-            os.startfile(path)
-        except OSError as exc:
-            QMessageBox.warning(self, "Video openen", str(exc))
+            window = VideoPlayerWindow(path, self, playlist=playlist)
+            self.player_windows.append(window)
+            window.destroyed.connect(
+                lambda: (
+                    self.player_windows.remove(window)
+                    if window in self.player_windows
+                    else None
+                )
+            )
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        except Exception as exc:
+            QMessageBox.critical(self, "Video Player", f"De ingebouwde speler kon niet worden geopend:\n\n{exc}")
 
     def closeEvent(self, event):
         self.thread_pool.clear()
         self.thread_pool.waitForDone(1500)
+        for window in list(self.player_windows):
+            try:
+                window.close()
+            except RuntimeError:
+                pass
         event.accept()
 
 
 if __name__ == "__main__":
-    import sys
-
-    app = QApplication(sys.argv)
+    app = QApplication([])
     window = VideoLibraryWindow()
     window.show()
-    sys.exit(app.exec())
+    app.exec()
