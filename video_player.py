@@ -33,6 +33,8 @@ class VideoPlayerWindow(QMainWindow):
         self.current_index = self.playlist.index(path) if path in self.playlist else 0
         self.path = self.playlist[self.current_index]
         self._autoplay_requested = False
+        self._load_generation = 0
+        self._closing = False
         self._ffmpeg_process = None
         self._ffmpeg_output = None
         self._using_ffmpeg_fallback = False
@@ -181,22 +183,50 @@ class VideoPlayerWindow(QMainWindow):
         if not self.playlist:
             self.close()
             return
+
+        self._load_generation += 1
+        generation = self._load_generation
+
+        # Stop een eventuele FFmpeg-conversie van de vorige video.
+        self._stop_ffmpeg_fallback()
+
+        # Maak de oude QMediaPlayer volledig onbruikbaar.
+        old_player = getattr(self, "player", None)
+        if old_player is not None:
+            try:
+                old_player.stop()
+                old_player.setVideoOutput(None)
+                old_player.deleteLater()
+            except Exception:
+                pass
+
         self.path = self.playlist[self.current_index]
         self._update_playlist_ui()
+
         self.position.setRange(0, 0)
         self.current_time.setText("00:00")
         self.total_time.setText("00:00")
         self.status.setText("Laden...")
         self._autoplay_requested = bool(autoplay)
-        self._stop_ffmpeg_fallback()
         self._using_ffmpeg_fallback = False
-        self.player.stop()
-        self.player.setSource(QUrl())
+
+        # Iedere video krijgt een volledig nieuwe QMediaPlayer.
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.audio)
+        self.player.setVideoOutput(self.video)
+
+        self.player.positionChanged.connect(self._position_changed)
+        self.player.durationChanged.connect(self._duration_changed)
+        self.player.playbackStateChanged.connect(self._state_changed)
+        self.player.mediaStatusChanged.connect(self._media_status_changed)
+        self.player.errorOccurred.connect(self._error)
+
         if not os.path.isfile(self.path):
             self._autoplay_requested = False
             self.status.setText("Bestand bestaat niet meer.")
             QTimer.singleShot(0, self._remove_missing_current)
             return
+
         self.player.setSource(QUrl.fromLocalFile(self.path))
 
     def toggle_play(self):
@@ -246,6 +276,8 @@ class VideoPlayerWindow(QMainWindow):
             self.status.setText("Gepauzeerd")
 
     def _media_status_changed(self, status):
+        if self._closing:
+            return
         if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia):
             if self._autoplay_requested:
                 self._autoplay_requested = False
@@ -376,6 +408,7 @@ class VideoPlayerWindow(QMainWindow):
             return False
 
         process = self._ffmpeg_process
+        generation = self._load_generation
 
         def worker():
             try:
@@ -385,15 +418,29 @@ class VideoPlayerWindow(QMainWindow):
                 stderr = str(exc).encode()
                 code = -1
             message = stderr.decode("utf-8", errors="replace").strip()[-500:]
-            if code == 0 and output.exists() and output.stat().st_size > 0:
-                QTimer.singleShot(0, lambda: self._play_ffmpeg_output(output))
-            else:
-                QTimer.singleShot(0, lambda: self._ffmpeg_failed(message or qt_error))
+            def finish_on_ui():
+                if self._closing:
+                    return
+                if generation != self._load_generation:
+                    return
+                if self._ffmpeg_process is not process:
+                    return
+
+                if code == 0 and output.exists() and output.stat().st_size > 0:
+                    self._play_ffmpeg_output(output, generation)
+                else:
+                    self._ffmpeg_failed(message or qt_error)
+
+            QTimer.singleShot(0, finish_on_ui)
 
         threading.Thread(target=worker, daemon=True).start()
         return True
 
-    def _play_ffmpeg_output(self, output):
+    def _play_ffmpeg_output(self, output, generation=None):
+        if self._closing:
+            return
+        if generation is not None and generation != self._load_generation:
+            return
         if not self._using_ffmpeg_fallback or not output.exists():
             return
         self.status.setText("Afspelen via FFmpeg compatibiliteitsmodus")
@@ -510,6 +557,7 @@ class VideoPlayerWindow(QMainWindow):
             self.showNormal()
 
     def closeEvent(self, event):
+        self._closing = True
         self._autoplay_requested = False
         self.player.stop()
         self.player.setSource(QUrl())
