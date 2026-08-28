@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import os
@@ -99,24 +99,84 @@ class FFprobeDialog(QDialog):
 
 
 def move_to_recycle_bin(paths: list[str]) -> tuple[list[str], list[str]]:
-    if not paths: return [], []
-    if os.name != "nt": raise RuntimeError("Windows Prullenbak is alleen beschikbaar op Windows.")
+    if not paths:
+        return [], []
+
+    if os.name != "nt":
+        raise RuntimeError(
+            "Windows Prullenbak is alleen beschikbaar op Windows."
+        )
+
     import ctypes
     from ctypes import wintypes
-    class SHFILEOPSTRUCTW(ctypes.Structure):
-        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR), ("fFlags", wintypes.UINT), ("fAnyOperationsAborted", wintypes.BOOL), ("hNameMappings", wintypes.LPVOID), ("lpszProgressTitle", wintypes.LPCWSTR)]
-    FO_DELETE = 0x0003; FOF_SILENT = 0x0004; FOF_NOCONFIRMATION = 0x0010; FOF_ALLOWUNDO = 0x0040; FOF_NOERRORUI = 0x0400
-    existing, failed = [], []
-    for path in paths:
-        try: (existing if Path(path).is_file() else failed).append(path)
-        except OSError: failed.append(path)
-    if not existing: return [], failed
-    source = "".join(path + "\0" for path in existing) + "\0"
-    operation = SHFILEOPSTRUCTW(None, FO_DELETE, source, None, FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI, False, None, None)
-    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
-    if result != 0 or operation.fAnyOperationsAborted: return [], failed + existing
-    return existing, failed
 
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.UINT),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    FO_DELETE = 0x0003
+    FOF_SILENT = 0x0004
+    FOF_NOCONFIRMATION = 0x0010
+    FOF_ALLOWUNDO = 0x0040
+    FOF_NOERRORUI = 0x0400
+
+    moved = []
+    failed = []
+
+    shell32 = ctypes.windll.shell32
+
+    for path in paths:
+        try:
+            file_path = Path(path)
+
+            if not file_path.is_file():
+                failed.append(path)
+                continue
+
+            # Eén bestand per Windows Shell-operatie.
+            source = str(file_path) + "\0\0"
+
+            operation = SHFILEOPSTRUCTW(
+                None,
+                FO_DELETE,
+                source,
+                None,
+                FOF_SILENT
+                | FOF_NOCONFIRMATION
+                | FOF_ALLOWUNDO
+                | FOF_NOERRORUI,
+                False,
+                None,
+                None,
+            )
+
+            result = shell32.SHFileOperationW(
+                ctypes.byref(operation)
+            )
+
+            if result == 0 and not operation.fAnyOperationsAborted:
+                # Controleer of het bestand daadwerkelijk verdwenen is.
+                if not file_path.exists():
+                    moved.append(path)
+                else:
+                    failed.append(path)
+            else:
+                failed.append(path)
+
+        except (OSError, ctypes.WinError):
+            failed.append(path)
+        except Exception:
+            failed.append(path)
+
+    return moved, failed
 
 class MainWindow(QMainWindow):
     def __init__(self):

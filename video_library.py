@@ -1034,6 +1034,7 @@ class VideoLibraryWindow(QMainWindow):
             playlist.insert(0, path)
         try:
             window = VideoPlayerWindow(path, self, playlist=playlist)
+            window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             self.player_windows.append(window)
             window.destroyed.connect(lambda: self.player_windows.remove(window) if window in self.player_windows else None)
             window.show()
@@ -1081,4 +1082,5 @@ if __name__ == "__main__":
     window = VideoLibraryWindow()
     window.show()
     app.exec()
+
 

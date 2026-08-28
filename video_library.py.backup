@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -34,6 +35,8 @@ class VideoItem:
     extension: str
     modified: float = 0.0
     metadata: dict | None = None
+    favorite: bool = False
+    watched: bool = False
 
 
 class WorkerSignals(QObject):
@@ -60,19 +63,26 @@ class ThumbnailTask(QRunnable):
         self.setAutoDelete(True)
 
     def run(self):
-        pixmap = None
+        # Worker-thread doet alleen bestand/FFmpeg werk.
+        # QPixmap wordt uitsluitend in de GUI-thread gemaakt.
+        data = None
+
         if os.path.isfile(self.cache_path):
-            cached = QPixmap(self.cache_path)
-            if not cached.isNull():
-                pixmap = cached
-        if pixmap is None:
-            pixmap = make_thumbnail(self.path)
-            if pixmap and not pixmap.isNull():
+            try:
+                data = Path(self.cache_path).read_bytes()
+            except OSError:
+                data = None
+
+        if data is None:
+            data = make_thumbnail_bytes(self.path)
+
+            if data:
                 try:
-                    pixmap.save(self.cache_path, "JPG", 88)
-                except Exception:
+                    Path(self.cache_path).write_bytes(data)
+                except OSError:
                     pass
-        self.signals.finished.emit(self.path, pixmap)
+
+        self.signals.finished.emit(self.path, data)
 
 
 class VideoCard(QFrame):
@@ -106,10 +116,35 @@ class VideoCard(QFrame):
         meta.setObjectName("libraryMeta")
         layout.addWidget(meta)
 
+        self.status_label = QLabel()
+        self.status_label.setObjectName("libraryStatusBadge")
+        self.update_status()
+
+        layout.addWidget(self.status_label)
+
         path_label = QLabel(str(Path(item.path).parent))
         path_label.setObjectName("libraryPath")
         path_label.setWordWrap(True)
         layout.addWidget(path_label, 1)
+
+    def update_status(self):
+        parts = []
+
+        if self.item.favorite:
+            parts.append("⭐ Favoriet")
+
+        if self.item.watched:
+            parts.append("✓ Bekeken")
+        else:
+            parts.append("○ Onbekeken")
+
+        self.status_label.setText("   ".join(parts))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.select_callback(self.item.path)
+
+        super().mousePressEvent(event)
 
     def set_thumbnail(self, pixmap):
         if pixmap and not pixmap.isNull():
@@ -198,21 +233,36 @@ def read_metadata(path: str) -> dict:
         return {"error": str(exc)}
 
 
-def make_thumbnail(path: str) -> QPixmap | None:
+def make_thumbnail_bytes(path: str) -> bytes | None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
+
     try:
-        result = subprocess.run([
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", "00:00:03",
-            "-i", path, "-frames:v", "1", "-vf", "scale=640:-2",
-            "-f", "image2", "pipe:1",
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
-        if result.returncode or not result.stdout:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel", "error",
+                "-threads", "1",
+                "-i", path,
+                "-frames:v", "1",
+                "-vf", "scale=640:-2",
+                "-q:v", "5",
+                "-f", "image2",
+                "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
+
+        if result.returncode != 0 or not result.stdout:
             return None
-        pixmap = QPixmap()
-        pixmap.loadFromData(result.stdout, "JPEG")
-        return pixmap if not pixmap.isNull() else None
+
+        return result.stdout
+
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -302,6 +352,15 @@ class VideoLibraryWindow(QMainWindow):
         self.resolution_box.addItems(["Alle resoluties", "4K", "1440p", "1080p", "720p", "SD"])
         self.resolution_box.currentIndexChanged.connect(self.refresh_cards)
         controls.addWidget(self.resolution_box)
+        self.status_filter = QComboBox()
+        self.status_filter.addItems([
+            "Alle video's",
+            "⭐ Favorieten",
+            "✓ Bekeken",
+            "○ Onbekeken",
+        ])
+        self.status_filter.currentIndexChanged.connect(self.refresh_cards)
+
         self.codec_box = QComboBox()
         self.codec_box.addItems(["Alle codecs", "H.264", "HEVC", "AV1"])
         self.codec_box.currentIndexChanged.connect(self.refresh_cards)
@@ -365,6 +424,16 @@ class VideoLibraryWindow(QMainWindow):
         self.detail_path.setWordWrap(True)
         dl.addWidget(self.detail_path)
         dl.addStretch(1)
+        self.favorite_button = QPushButton("⭐  Favoriet")
+        self.favorite_button.setCheckable(True)
+        self.favorite_button.clicked.connect(self.toggle_favorite)
+        dl.addWidget(self.favorite_button)
+
+        self.watched_button = QPushButton("✓  Bekeken")
+        self.watched_button.setCheckable(True)
+        self.watched_button.clicked.connect(self.toggle_watched)
+        dl.addWidget(self.watched_button)
+
         self.play_button = QPushButton("▶  Afspelen in Video Suite Player")
         self.play_button.setObjectName("primary")
         self.play_button.setEnabled(False)
@@ -378,6 +447,11 @@ class VideoLibraryWindow(QMainWindow):
         self.analyze_button.setEnabled(False)
         self.analyze_button.clicked.connect(self.analyze_selected)
         dl.addWidget(self.analyze_button)
+
+        self.delete_button = QPushButton("🗑  Naar Prullenbak")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.delete_selected)
+        dl.addWidget(self.delete_button)
         splitter.addWidget(details)
         splitter.setSizes([1040, 390])
         layout.addWidget(splitter, 1)
@@ -409,6 +483,7 @@ class VideoLibraryWindow(QMainWindow):
             QLabel#libraryTitle { font-size:15px; font-weight:800; color:#fff; }
             QLabel#libraryMeta { color:#6f9bd0; font-weight:700; }
             QLabel#libraryPath { color:#777f8c; font-size:11px; }
+            QLabel#libraryStatusBadge { color:#d9b85a; font-weight:700; padding:3px 0; }
             QFrame#detailsPanel { background:#171a20; border:1px solid #303640; border-radius:10px; }
             QLabel#detailPreview { background:#0b0d11; border:1px solid #303640; border-radius:8px; color:#6f7784; }
             QLabel#detailTitle { color:#fff; font-size:18px; font-weight:800; }
@@ -437,14 +512,20 @@ class VideoLibraryWindow(QMainWindow):
             if path == root or root in path.parents:
                 items.append(VideoItem(
                     str(path), row["name"], int(row["size"]), row["extension"],
-                    float(row["modified"]), self.db.metadata(row),
+                    float(row["modified"]),
+                    self.db.metadata(row),
+                    bool(row["favorite"]),
+                    bool(row["watched"]),
                 ))
         self.items = items
         if items:
             total = sum(i.size for i in items)
             self.stats.setText(f"{len(items):,} video's  •  {format_size(total)}  •  index geladen")
             self.refresh_cards()
-            self._start_thumbnails()
+            # Eerst de lijst tonen. Zware preview/metadata-verwerking
+        # gebeurt daarna gecontroleerd.
+        self._start_thumbnails()
+        self._start_metadata_queue()
 
     def scan(self):
         if not self.folder or not os.path.isdir(self.folder):
@@ -468,9 +549,21 @@ class VideoLibraryWindow(QMainWindow):
                 row = self.db.get(p)
                 metadata = self.db.metadata(row) if row else {}
                 unchanged = bool(row and int(row["size"]) == stat.st_size and float(row["modified"]) == stat.st_mtime)
-                found.append(VideoItem(p, path.name, stat.st_size, path.suffix.lower(), stat.st_mtime, metadata if unchanged else {}))
-                if not unchanged:
-                    self.pool.start(MetadataTask(p, self.metadata_signals))
+                found.append(
+                    VideoItem(
+                        p,
+                        path.name,
+                        stat.st_size,
+                        path.suffix.lower(),
+                        stat.st_mtime,
+                        metadata if unchanged else {},
+                        bool(row["favorite"]) if row else False,
+                        bool(row["watched"]) if row else False,
+                    )
+                )
+                # Metadata wordt pas na het verzamelen van alle bestanden
+                # verwerkt. Zo starten we niet honderden FFprobe-processen
+                # tijdens het scannen.
         except OSError as exc:
             QMessageBox.critical(self, "Video Library", str(exc))
         self.db.delete_missing(existing)
@@ -484,12 +577,55 @@ class VideoLibraryWindow(QMainWindow):
         self.status.setText("Index bijgewerkt. Metadata wordt op de achtergrond verwerkt…")
         self._start_thumbnails()
 
+    def _start_metadata_queue(self):
+        """Verwerk metadata gecontroleerd nadat de scan zichtbaar is."""
+        pending = [
+            item.path
+            for item in self.items
+            if not item.metadata or item.metadata.get("error")
+        ]
+
+        if not pending:
+            return
+
+        self.metadata_queue = pending
+        self.metadata_queue_index = 0
+        self.status.setText(
+            f"Video's gevonden. Metadata wordt verwerkt: "
+            f"0 / {len(pending):,}"
+        )
+        self._start_next_metadata()
+
+    def _start_next_metadata(self):
+        if not hasattr(self, "metadata_queue"):
+            return
+
+        # Houd maximaal twee metadata-processen tegelijk actief.
+        active = getattr(self, "_metadata_active", 0)
+
+        while active < 2 and self.metadata_queue_index < len(self.metadata_queue):
+            path = self.metadata_queue[self.metadata_queue_index]
+            self.metadata_queue_index += 1
+            active += 1
+            self.pool.start(MetadataTask(path, self.metadata_signals))
+
+        self._metadata_active = active
+
     def _visible_items(self):
         query = self.search.text().casefold().strip()
         resolution = self.resolution_box.currentText()
         codec_filter = self.codec_box.currentText()
         result = []
+        status_filter = self.status_filter.currentIndex()
+
         for item in self.items:
+            if status_filter == 1 and not item.favorite:
+                continue
+            if status_filter == 2 and not item.watched:
+                continue
+            if status_filter == 3 and item.watched:
+                continue
+
             if query and query not in item.name.casefold() and query not in item.path.casefold():
                 continue
             meta = item.metadata or {}
@@ -514,23 +650,61 @@ class VideoLibraryWindow(QMainWindow):
         return result
 
     def refresh_cards(self):
+        # Nooit duizenden Qt-widgets tegelijk aanmaken.
+        # De database/lijst mag groot zijn, maar de GUI toont slechts
+        # een beperkt aantal kaarten tegelijk.
         for card in self.cards:
             card.deleteLater()
+
         self.cards.clear()
         self.card_by_path.clear()
+
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
         items = self._visible_items()
-        for index, item in enumerate(items):
-            card = VideoCard(item, self.select_video, self.open_video, self.container)
+
+        # Maximaal 60 kaarten tegelijk.
+        # Dit voorkomt dat een bibliotheek van 10.000+ video's
+        # de GUI laat vastlopen.
+        display_items = items[:60]
+
+        for index, item in enumerate(display_items):
+            card = VideoCard(
+                item,
+                self.select_video,
+                self.open_video,
+                self.container,
+            )
             card.set_selected(item.path == self.selected_path)
+
             self.cards.append(card)
             self.card_by_path[item.path] = card
-            self.grid.addWidget(card, index // 3, index % 3)
-        self.grid.setRowStretch(max(1, (len(items) + 2) // 3), 1)
-        self.status.setText(f"Weergave: {len(items):,} van {len(self.items):,} video's")
+
+            self.grid.addWidget(
+                card,
+                index // 3,
+                index % 3,
+            )
+
+        rows = max(1, (len(display_items) + 2) // 3)
+        self.grid.setRowStretch(rows, 1)
+
+        if len(items) > 60:
+            self.status.setText(
+                f"Weergave: eerste 60 van {len(items):,} video's "
+                f"(totaal geïndexeerd: {len(self.items):,})"
+            )
+        else:
+            self.status.setText(
+                f"Weergave: {len(items):,} van {len(self.items):,} video's"
+            )
+
+        # Alleen voor de kaarten die daadwerkelijk op het scherm staan
+        # worden previews gestart.
+        self._start_thumbnails()
 
     def _thumb_cache_path(self, path):
         root = Path(self.folder or Path(path).parent)
@@ -547,23 +721,169 @@ class VideoLibraryWindow(QMainWindow):
         paths = list(self.card_by_path)
         self.thumbnail_total = len(paths)
         self.thumbnail_done = 0
+        self.thumbnail_queue = paths
+        self.thumbnail_queue_index = 0
+        self.thumbnail_active = 0
+
         if not paths:
             return
-        self.status.setText(f"Preview's laden: 0 / {len(paths):,}")
-        self.pool.clear()
-        for path in paths:
-            self.pool.start(ThumbnailTask(path, self._thumb_cache_path(path), self.thumbnail_signals))
 
-    def _thumbnail_finished(self, path, pixmap):
+        self.status.setText(
+            f"Preview's laden: 0 / {len(paths):,}"
+        )
+
+        # Start slechts een kleine hoeveelheid tegelijk.
+        self._start_next_thumbnails()
+
+    def _start_next_thumbnails(self):
+        if not hasattr(self, "thumbnail_queue"):
+            return
+
+        # Nooit meer dan twee FFmpeg-thumbnailtaken tegelijk.
+        while (
+            self.thumbnail_active < 2
+            and self.thumbnail_queue_index < len(self.thumbnail_queue)
+        ):
+            path = self.thumbnail_queue[self.thumbnail_queue_index]
+            self.thumbnail_queue_index += 1
+            self.thumbnail_active += 1
+
+            self.pool.start(
+                ThumbnailTask(
+                    path,
+                    self._thumb_cache_path(path),
+                    self.thumbnail_signals,
+                )
+            )
+
+    def _thumbnail_finished(self, path, data):
+        self.thumbnail_active = max(0, self.thumbnail_active - 1)
         self.thumbnail_done += 1
+
+        pixmap = QPixmap()
+        if data:
+            pixmap.loadFromData(data)
+
         card = self.card_by_path.get(path)
         if card:
             card.set_thumbnail(pixmap)
-        if path == self.selected_path and pixmap and not pixmap.isNull():
+
+        if path == self.selected_path and not pixmap.isNull():
             self.detail_preview.setText("")
-            self.detail_preview.setPixmap(pixmap.scaled(500, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.detail_preview.setPixmap(
+                pixmap.scaled(
+                    500,
+                    220,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+        self._start_next_thumbnails()
+
         if self.thumbnail_done >= self.thumbnail_total:
-            self.status.setText(f"Klaar: {len(self.items):,} video's • previews geladen")
+            self.status.setText(
+                f"Klaar: {len(self.items):,} video's • previews geladen"
+            )
+        else:
+            self.status.setText(
+                f"Preview's laden: "
+                f"{self.thumbnail_done:,} / {self.thumbnail_total:,}"
+            )
+
+    def delete_selected(self):
+        path = self.selected_path
+
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(
+                self,
+                "Video verwijderen",
+                "Selecteer eerst een geldige video."
+            )
+            return
+
+        name = Path(path).name
+
+        answer = QMessageBox.question(
+            self,
+            "Naar Prullenbak",
+            f"Weet je zeker dat je deze video naar de Windows Prullenbak wilt verplaatsen?\n\n{name}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            # Windows Shell: verplaats naar Prullenbak met Undo mogelijk.
+            class SHFILEOPSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", ctypes.c_void_p),
+                    ("wFunc", ctypes.c_uint),
+                    ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p),
+                    ("fFlags", ctypes.c_ushort),
+                    ("fAnyOperationsAborted", ctypes.c_bool),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", ctypes.c_wchar_p),
+                ]
+
+            FO_DELETE = 0x0003
+            FOF_ALLOWUNDO = 0x0040
+            FOF_NOCONFIRMATION = 0x0010
+            FOF_NOERRORUI = 0x0400
+            FOF_SILENT = 0x0004
+
+            op = SHFILEOPSTRUCT()
+            op.wFunc = FO_DELETE
+            op.pFrom = path + "\0"
+            op.fFlags = (
+                FOF_ALLOWUNDO
+                | FOF_NOCONFIRMATION
+                | FOF_NOERRORUI
+                | FOF_SILENT
+            )
+
+            result = ctypes.windll.shell32.SHFileOperationW(
+                ctypes.byref(op)
+            )
+
+            if result != 0 or op.fAnyOperationsAborted:
+                raise OSError(f"Windows kon het bestand niet naar de Prullenbak verplaatsen. Code: {result}")
+
+            # Uit database verwijderen
+            self.db.delete_video(path)
+
+            # Uit huidige lijst verwijderen
+            self.items = [
+                item for item in self.items
+                if item.path != path
+            ]
+
+            self.selected_path = ""
+            self.clear_details()
+            self.refresh_cards()
+
+            self.play_button.setEnabled(False)
+            self.folder_button.setEnabled(False)
+            self.analyze_button.setEnabled(False)
+            self.delete_button.setEnabled(False)
+
+            total = sum(item.size for item in self.items)
+            self.stats.setText(
+                f"{len(self.items):,} video's  •  {format_size(total)}"
+            )
+            self.status.setText(
+                f"🗑 Naar Prullenbak: {name}"
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Video verwijderen",
+                f"De video kon niet naar de Prullenbak worden verplaatst.\n\n{exc}"
+            )
 
     def select_video(self, path):
         if not os.path.isfile(path):
@@ -593,9 +913,53 @@ class VideoLibraryWindow(QMainWindow):
             self.detail_preview.setPixmap(card.preview.pixmap().scaled(500, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:
             self.detail_preview.setText("Preview laden…")
+        self.favorite_button.setChecked(item.favorite)
+        self.watched_button.setChecked(item.watched)
+
         self.play_button.setEnabled(True)
         self.folder_button.setEnabled(True)
         self.analyze_button.setEnabled(True)
+        self.delete_button.setEnabled(True)
+
+    def toggle_favorite(self, checked):
+        if not self.selected_path:
+            return
+
+        item = next(
+            (x for x in self.items if x.path == self.selected_path),
+            None,
+        )
+        if not item:
+            return
+
+        item.favorite = bool(checked)
+        self.db.set_favorite(item.path, item.favorite)
+
+        card = self.card_by_path.get(item.path)
+        if card:
+            card.update_status()
+
+        self.refresh_cards()
+
+    def toggle_watched(self, checked):
+        if not self.selected_path:
+            return
+
+        item = next(
+            (x for x in self.items if x.path == self.selected_path),
+            None,
+        )
+        if not item:
+            return
+
+        item.watched = bool(checked)
+        self.db.set_watched(item.path, item.watched)
+
+        card = self.card_by_path.get(item.path)
+        if card:
+            card.update_status()
+
+        self.refresh_cards()
 
     def _fill_details(self, data, path):
         streams = data.get("streams", [])
@@ -614,10 +978,26 @@ class VideoLibraryWindow(QMainWindow):
         self.detail_labels["container"].setText(str(fmt.get("format_name") or Path(path).suffix).upper())
 
     def _metadata_finished(self, path, data):
+        self._metadata_active = max(0, getattr(self, "_metadata_active", 1) - 1)
+
         item = next((x for x in self.items if x.path == path), None)
         if not item:
             return
         item.metadata = data
+        self._metadata_active = max(0, getattr(self, "_metadata_active", 1) - 1)
+
+        try:
+            self.db.upsert(
+                path,
+                item.name,
+                item.size,
+                item.extension,
+                item.modified,
+            )
+        except Exception:
+            pass
+
+        self._start_next_metadata()
         try:
             self.db.save(path=item.path, name=item.name, extension=item.extension, size=item.size,
                           modified=item.modified, metadata=data, indexed_at=time.time())
