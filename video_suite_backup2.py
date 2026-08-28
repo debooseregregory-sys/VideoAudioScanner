@@ -26,17 +26,16 @@ from video_tools import VideoToolsWindow
 from video_converter import VideoConverterWindow
 from video_library import VideoLibraryWindow
 from video_player import VideoPlayerWindow
-from subtitle_maker import SubtitleMakerWindow
 
 
 class ModuleCard(QFrame):
     def __init__(self, icon, title, description, button_text, callback, enabled=True, parent=None):
         super().__init__(parent)
         self.setObjectName("moduleCard")
-        self.setMinimumHeight(155)
+        self.setMinimumHeight(210)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(5)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(8)
         icon_label = QLabel(icon)
         icon_label.setObjectName("moduleIcon")
         layout.addWidget(icon_label)
@@ -68,8 +67,8 @@ class WizardWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(18)
         title = QLabel("🧭  VIDEO WIZARD")
         title.setObjectName("wizardTitle")
         layout.addWidget(title)
@@ -166,7 +165,6 @@ class VideoSuiteWindow(QMainWindow):
         self.thumbnail_window = None
         self.wizard_window = None
         self.video_tools_window = None
-        self.subtitle_maker_window = None
         self.player_windows = []
         self._build_ui()
         self._apply_theme()
@@ -174,8 +172,8 @@ class VideoSuiteWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(18)
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title = QLabel("VIDEO SUITE")
@@ -208,7 +206,7 @@ class VideoSuiteWindow(QMainWindow):
         grid = QGridLayout(host)
         grid.setContentsMargins(0, 0, 8, 0)
         grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(14)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         modules = [
@@ -221,7 +219,6 @@ class VideoSuiteWindow(QMainWindow):
             ("📚", "VIDEO LIBRARY", "Een visuele bibliotheek met thumbnails, zoeken en sorteren.", "Library openen", self.open_library, True),
             ("🖼", "THUMBNAIL TOOL", "Maak één of meerdere thumbnails met voorbeeld, JPG/PNG en optionele breedte.", "Thumbnail Tool openen", self.open_thumbnails, True),
             ("🛠", "VIDEO TOOLS", "Extra gereedschap voor audio uit video, knippen, thumbnails, controle en streams.", "Video Tools openen", self.open_video_tools, True),
-            ("SUB", "SUBTITLE MAKER", "Maak automatisch ondertitels met Faster-Whisper XXL. De taal wordt automatisch herkend en het resultaat wordt als SRT opgeslagen.", "Ondertitels maken", self.open_subtitle_maker, True),
         ]
         for index, module in enumerate(modules):
             grid.addWidget(ModuleCard(*module, parent=self), index // 2, index % 2)
@@ -284,12 +281,6 @@ class VideoSuiteWindow(QMainWindow):
     def open_storage(self): self._show_window("storage_window", lambda: StorageAnalyzerWindow(self))
     def open_library(self): self._show_window("library_window", lambda: VideoLibraryWindow(self))
     def open_thumbnails(self): self._show_window("thumbnail_window", lambda: ThumbnailToolWindow(self))
-
-    def open_subtitle_maker(self):
-        self._show_window(
-            "subtitle_maker_window",
-            lambda: SubtitleMakerWindow(self)
-        )
     def open_video_tools(self): self._show_window("video_tools_window", lambda: VideoToolsWindow(self))
 
     def open_player(self):
@@ -309,7 +300,7 @@ class VideoSuiteWindow(QMainWindow):
                 window.close()
             except RuntimeError:
                 pass
-        for window in (self.scanner_window, self.duplicate_window, self.quality_window, self.converter_window, self.storage_window, self.library_window, self.thumbnail_window, self.video_tools_window, self.subtitle_maker_window, self.wizard_window):
+        for window in (self.scanner_window, self.duplicate_window, self.quality_window, self.converter_window, self.storage_window, self.library_window, self.thumbnail_window, self.video_tools_window, self.wizard_window):
             if window is not None:
                 try:
                     window.close()
@@ -333,7 +324,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
