@@ -96,6 +96,7 @@ class WizardWindow(QMainWindow):
             ("♻", "Dubbele video's zoeken", "Exact dezelfde of visueel bijna dezelfde video's vinden.", self.suite.open_duplicates),
             ("📊", "Videokwaliteit vergelijken", "Resolutie, bitrate, codec, FPS, audio en bestandsgrootte vergelijken.", self.suite.open_quality),
             ("🔄", "Video omzetten", "Een video converteren naar MP4, MKV of WebM.", self.suite.open_converter),
+            ("🗜", "Kleinere video maken zonder merkbaar kwaliteitsverlies", "Maak het bestand kleiner met efficiëntere compressie en behoud de beeldkwaliteit zo goed mogelijk.", self.suite.open_converter),
             ("🔎", "Mijn bestanden analyseren", "Video- en audiobestanden technisch laten analyseren.", self.suite.open_scanner),
             ("💾", "Opslagruimte bekijken", "Ontdekken welke bestanden de meeste ruimte innemen.", self.suite.open_storage),
             ("📚", "Video Library", "Een visueel overzicht met thumbnails, zoeken en sorteren.", self.suite.open_library),
