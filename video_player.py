@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
@@ -35,6 +39,9 @@ class VideoPlayerWindow(QMainWindow):
         self.current_index = self.playlist.index(path) if path in self.playlist else 0
         self.path = self.playlist[self.current_index]
         self._autoplay_requested = False
+        self._ffmpeg_process = None
+        self._ffmpeg_temp_dir = Path(tempfile.mkdtemp(prefix="videoaudio_player_"))
+        self._using_ffmpeg_fallback = False
 
         self.setWindowTitle(f"Video bekijken — {Path(self.path).name}")
         self.resize(1100, 720)
@@ -198,6 +205,8 @@ class VideoPlayerWindow(QMainWindow):
         # play() onmiddellijk na setSource() aan. Op sommige Windows/
         # QtMultimedia-backends kan dat resulteren in ongeveer één seconde
         # video waarna playback stopt.
+        self._stop_ffmpeg_fallback()
+        self._using_ffmpeg_fallback = False
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(self.path))
 
@@ -282,7 +291,10 @@ class VideoPlayerWindow(QMainWindow):
         elif status == QMediaPlayer.MediaStatus.StalledMedia:
             self.status.setText("Video tijdelijk geblokkeerd — wachten...")
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
-            self.status.setText("Ongeldige of niet ondersteunde video.")
+            if not self._using_ffmpeg_fallback:
+                self._start_ffmpeg_fallback()
+            else:
+                self.status.setText("Ongeldige of niet ondersteunde video.")
 
     def _repeat_changed(self, checked: bool):
         self.repeat_button.setText("Herhalen: aan" if checked else "Herhalen: uit")
@@ -339,9 +351,97 @@ class VideoPlayerWindow(QMainWindow):
             self.current_index = len(self.playlist) - 1
         self._update_playlist_ui()
 
+    def _find_ffmpeg(self):
+        candidates = []
+        if getattr(sys, "frozen", False):
+            candidates.extend([
+                Path(sys.executable).resolve().parent / "ffmpeg.exe",
+                Path(getattr(sys, "_MEIPASS", "")) / "ffmpeg.exe",
+            ])
+        candidates.append(Path(__file__).resolve().parent / "ffmpeg.exe")
+        found = shutil.which("ffmpeg")
+        if found:
+            candidates.append(Path(found))
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return str(candidate)
+            except OSError:
+                pass
+        return None
+
+    def _start_ffmpeg_fallback(self):
+        ffmpeg = self._find_ffmpeg()
+        if not ffmpeg:
+            self.status.setText("Codec ontbreekt en ffmpeg.exe is niet gevonden.")
+            return False
+
+        self._stop_ffmpeg_fallback()
+        self._using_ffmpeg_fallback = True
+        output = self._ffmpeg_temp_dir / "fallback.mp4"
+        try:
+            output.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        self.status.setText("Codec niet ondersteund — FFmpeg compatibiliteitsmodus...")
+        self._ffmpeg_process = subprocess.Popen(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", self.path,
+             "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264",
+             "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+             str(output)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+        import threading
+        def worker():
+            process = self._ffmpeg_process
+            if process is None:
+                return
+            stderr = process.communicate()[1]
+            from PySide6.QtCore import QTimer
+            if process.returncode == 0 and output.exists():
+                QTimer.singleShot(0, lambda: self._play_ffmpeg_output(output))
+            else:
+                msg = stderr.decode("utf-8", errors="replace").strip()[-400:]
+                QTimer.singleShot(0, lambda: self._ffmpeg_failed(msg))
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _play_ffmpeg_output(self, output):
+        if not self._using_ffmpeg_fallback or not output.exists():
+            return
+        self.status.setText("Afspelen via FFmpeg compatibiliteitsmodus")
+        self._autoplay_requested = True
+        self.player.stop()
+        self.player.setSource(QUrl.fromLocalFile(str(output)))
+
+    def _ffmpeg_failed(self, message):
+        self._using_ffmpeg_fallback = False
+        self.status.setText("FFmpeg kon deze video niet converteren." + (f" {message}" if message else ""))
+
+    def _stop_ffmpeg_fallback(self):
+        self._using_ffmpeg_fallback = False
+        process = self._ffmpeg_process
+        self._ffmpeg_process = None
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=2)
+            except Exception:
+                pass
+
     def _error(self, error, error_string: str):
         if error != QMediaPlayer.Error.NoError:
-            self.status.setText("Kan video niet afspelen: " + (error_string or "onbekende fout"))
+            if not self._using_ffmpeg_fallback:
+                self._start_ffmpeg_fallback()
+            else:
+                self.status.setText("Kan video niet afspelen: " + (error_string or "onbekende fout"))
 
     def toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -354,4 +454,6 @@ class VideoPlayerWindow(QMainWindow):
         self._autoplay_requested = False
         self.player.stop()
         self.player.setSource(QUrl())
+        self._stop_ffmpeg_fallback()
+        shutil.rmtree(self._ffmpeg_temp_dir, ignore_errors=True)
         super().closeEvent(event)
