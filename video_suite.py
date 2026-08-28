@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 
@@ -22,7 +22,7 @@ from main import MainWindow as ScannerWindow
 from quality_analyzer import QualityAnalyzerWindow
 from storage_analyzer import StorageAnalyzerWindow
 from thumbnail_tool import ThumbnailToolWindow
-from video_tools import VideoToolsWindow
+from video_tools_hub import VideoToolsHubWindow
 from video_converter import VideoConverterWindow
 from video_library import VideoLibraryWindow
 from video_player import VideoPlayerWindow
@@ -80,7 +80,6 @@ class WizardWindow(QMainWindow):
         question = QLabel("Wat wil je doen?")
         question.setObjectName("question")
         layout.addWidget(question)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -199,7 +198,6 @@ class VideoSuiteWindow(QMainWindow):
         intro.setObjectName("intro")
         intro.setWordWrap(True)
         layout.addWidget(intro)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -220,7 +218,7 @@ class VideoSuiteWindow(QMainWindow):
             ("💾", "STORAGE ANALYZER", "Analyseert opslaggebruik en toont de grootste bestanden.", "Opslag analyseren", self.open_storage, True),
             ("📚", "VIDEO LIBRARY", "Een visuele bibliotheek met thumbnails, zoeken en sorteren.", "Library openen", self.open_library, True),
             ("🖼", "THUMBNAIL TOOL", "Maak één of meerdere thumbnails met voorbeeld, JPG/PNG en optionele breedte.", "Thumbnail Tool openen", self.open_thumbnails, True),
-            ("🛠", "VIDEO TOOLS", "Extra gereedschap voor audio uit video, knippen, thumbnails, controle en streams.", "Video Tools openen", self.open_video_tools, True),
+            ("🛠", "VIDEO TOOLS", "Visueel knippen, video's samenvoegen en bestaande video-tools.", "Video Tools openen", self.open_video_tools, True),
             ("SUB", "SUBTITLE MAKER", "Maak automatisch ondertitels met Faster-Whisper XXL. De taal wordt automatisch herkend en het resultaat wordt als SRT opgeslagen.", "Ondertitels maken", self.open_subtitle_maker, True),
         ]
         for index, module in enumerate(modules):
@@ -274,9 +272,7 @@ class VideoSuiteWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
-    def open_wizard(self):
-        self._show_window("wizard_window", lambda: WizardWindow(self))
-
+    def open_wizard(self): self._show_window("wizard_window", lambda: WizardWindow(self))
     def open_scanner(self): self._show_window("scanner_window", ScannerWindow)
     def open_duplicates(self): self._show_window("duplicate_window", DuplicateFinderWindow)
     def open_quality(self): self._show_window("quality_window", lambda: QualityAnalyzerWindow(self))
@@ -286,11 +282,10 @@ class VideoSuiteWindow(QMainWindow):
     def open_thumbnails(self): self._show_window("thumbnail_window", lambda: ThumbnailToolWindow(self))
 
     def open_subtitle_maker(self):
-        self._show_window(
-            "subtitle_maker_window",
-            lambda: SubtitleMakerWindow(self)
-        )
-    def open_video_tools(self): self._show_window("video_tools_window", lambda: VideoToolsWindow(self))
+        self._show_window("subtitle_maker_window", lambda: SubtitleMakerWindow(self))
+
+    def open_video_tools(self):
+        self._show_window("video_tools_window", lambda: VideoToolsHubWindow(self))
 
     def open_player(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Kies video's", "", "Video's (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.mpeg *.mpg *.ts *.mts *.m2ts);;Alle bestanden (*)")
@@ -333,7 +328,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
