@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -32,12 +32,9 @@ class VideoPlayerWindow(QMainWindow):
         super().__init__(parent)
 
         self.playlist = list(playlist or [path])
-        self.current_index = 0
-
-        if path in self.playlist:
-            self.current_index = self.playlist.index(path)
-
+        self.current_index = self.playlist.index(path) if path in self.playlist else 0
         self.path = self.playlist[self.current_index]
+        self._autoplay_requested = False
 
         self.setWindowTitle(f"Video bekijken — {Path(self.path).name}")
         self.resize(1100, 720)
@@ -46,7 +43,6 @@ class VideoPlayerWindow(QMainWindow):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.video = QVideoWidget(self)
-
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
         self.audio.setVolume(0.85)
@@ -58,11 +54,8 @@ class VideoPlayerWindow(QMainWindow):
 
         self.title = QLabel()
         self.title.setObjectName("playerTitle")
-        self.title.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self.title)
-
         root.addWidget(self.video, 1)
 
         self.position = QSlider(Qt.Orientation.Horizontal)
@@ -71,67 +64,46 @@ class VideoPlayerWindow(QMainWindow):
         root.addWidget(self.position)
 
         time_row = QHBoxLayout()
-
         self.current_time = QLabel("00:00")
         self.total_time = QLabel("00:00")
-
         time_row.addWidget(self.current_time)
         time_row.addStretch(1)
         time_row.addWidget(self.total_time)
-
         root.addLayout(time_row)
 
         controls = QHBoxLayout()
-
         self.previous_button = QPushButton("Vorige")
-        self.previous_button.setToolTip("Vorige video")
         self.previous_button.clicked.connect(self.previous_video)
         controls.addWidget(self.previous_button)
 
         self.play_button = QPushButton()
-        self.play_button.setIcon(
-            self.style().standardIcon(
-                QStyle.StandardPixmap.SP_MediaPlay
-            )
-        )
+        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setToolTip("Afspelen / pauzeren (spatie)")
         self.play_button.clicked.connect(self.toggle_play)
         controls.addWidget(self.play_button)
 
         self.next_button = QPushButton("Volgende")
-        self.next_button.setToolTip("Volgende video")
         self.next_button.clicked.connect(self.next_video)
         controls.addWidget(self.next_button)
 
         stop = QPushButton()
-        stop.setIcon(
-            self.style().standardIcon(
-                QStyle.StandardPixmap.SP_MediaStop
-            )
-        )
+        stop.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
         stop.setToolTip("Stop")
         stop.clicked.connect(self.stop)
         controls.addWidget(stop)
 
         self.repeat_button = QPushButton("Herhalen: uit")
         self.repeat_button.setCheckable(True)
-        self.repeat_button.setToolTip(
-            "Herhaal de huidige video wanneer deze afgelopen is"
-        )
         self.repeat_button.toggled.connect(self._repeat_changed)
         controls.addWidget(self.repeat_button)
 
         controls.addWidget(QLabel("Volume"))
-
         self.volume = QSlider(Qt.Orientation.Horizontal)
         self.volume.setRange(0, 100)
         self.volume.setValue(85)
         self.volume.setFixedWidth(130)
-        self.volume.valueChanged.connect(
-            lambda value: self.audio.setVolume(value / 100.0)
-        )
+        self.volume.valueChanged.connect(lambda value: self.audio.setVolume(value / 100.0))
         controls.addWidget(self.volume)
-
         controls.addStretch(1)
 
         self.playlist_label = QLabel()
@@ -139,167 +111,51 @@ class VideoPlayerWindow(QMainWindow):
         controls.addWidget(self.playlist_label)
 
         fullscreen = QPushButton("Volledig scherm")
-        fullscreen.setToolTip("Volledig scherm (F11)")
         fullscreen.clicked.connect(self.toggle_fullscreen)
         controls.addWidget(fullscreen)
-
         root.addLayout(controls)
 
         action_row = QHBoxLayout()
-
-        self.delete_button = QPushButton(
-            "Naar Prullenbak"
-        )
+        self.delete_button = QPushButton("Naar Prullenbak")
         self.delete_button.setObjectName("danger")
-        self.delete_button.setToolTip(
-            "De huidige video naar de Windows Prullenbak verplaatsen"
-        )
-        self.delete_button.clicked.connect(
-            self.delete_current_video
-        )
+        self.delete_button.clicked.connect(self.delete_current_video)
         action_row.addWidget(self.delete_button)
-
         action_row.addStretch(1)
-
         root.addLayout(action_row)
 
         self.status = QLabel("Laden...")
         self.status.setObjectName("playerStatus")
         root.addWidget(self.status)
-
         self.setCentralWidget(central)
 
-        self.setStyleSheet(
-            """
-            QWidget {
-                background: #101216;
-                color: #e8eaed;
-                font-size: 13px;
-            }
+        self.setStyleSheet("""
+            QWidget { background: #101216; color: #e8eaed; font-size: 13px; }
+            QMainWindow { background: #101216; }
+            QLabel#playerTitle { color: #ffffff; font-size: 17px; font-weight: 700; padding: 3px 2px; }
+            QLabel#playerStatus { color: #8f96a3; padding: 2px; }
+            QLabel#playlistLabel { color: #c8ccd3; font-weight: 600; padding: 4px 8px; }
+            QVideoWidget { background: #050608; border: 1px solid #30343c; border-radius: 6px; }
+            QPushButton { background: #292e36; border: 1px solid #3c424c; border-radius: 6px; padding: 8px 12px; }
+            QPushButton:hover { background: #353b45; }
+            QPushButton:checked { background: #315f9e; border-color: #5686c4; }
+            QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; }
+            QPushButton#danger:hover { background: #6a3036; }
+            QPushButton:disabled { color: #666c75; background: #202329; }
+            QSlider::groove:horizontal { height: 5px; background: #30343c; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 13px; margin: -4px 0; border-radius: 6px; background: #6e8fbe; }
+        """)
 
-            QMainWindow {
-                background: #101216;
-            }
+        self.player.positionChanged.connect(self._position_changed)
+        self.player.durationChanged.connect(self._duration_changed)
+        self.player.playbackStateChanged.connect(self._state_changed)
+        self.player.mediaStatusChanged.connect(self._media_status_changed)
+        self.player.errorOccurred.connect(self._error)
 
-            QLabel#playerTitle {
-                color: #ffffff;
-                font-size: 17px;
-                font-weight: 700;
-                padding: 3px 2px;
-            }
-
-            QLabel#playerStatus {
-                color: #8f96a3;
-                padding: 2px;
-            }
-
-            QLabel#playlistLabel {
-                color: #c8ccd3;
-                font-weight: 600;
-                padding: 4px 8px;
-            }
-
-            QVideoWidget {
-                background: #050608;
-                border: 1px solid #30343c;
-                border-radius: 6px;
-            }
-
-            QPushButton {
-                background: #292e36;
-                border: 1px solid #3c424c;
-                border-radius: 6px;
-                padding: 8px 12px;
-            }
-
-            QPushButton:hover {
-                background: #353b45;
-            }
-
-            QPushButton:checked {
-                background: #315f9e;
-                border-color: #5686c4;
-            }
-
-            QPushButton#danger {
-                background: #54272b;
-                border-color: #824047;
-                font-weight: 600;
-            }
-
-            QPushButton#danger:hover {
-                background: #6a3036;
-            }
-
-            QPushButton:disabled {
-                color: #666c75;
-                background: #202329;
-            }
-
-            QSlider::groove:horizontal {
-                height: 5px;
-                background: #30343c;
-                border-radius: 2px;
-            }
-
-            QSlider::handle:horizontal {
-                width: 13px;
-                margin: -4px 0;
-                border-radius: 6px;
-                background: #6e8fbe;
-            }
-            """
-        )
-
-        self.player.positionChanged.connect(
-            self._position_changed
-        )
-
-        self.player.durationChanged.connect(
-            self._duration_changed
-        )
-
-        self.player.playbackStateChanged.connect(
-            self._state_changed
-        )
-
-        self.player.mediaStatusChanged.connect(
-            self._media_status_changed
-        )
-
-        self.player.errorOccurred.connect(
-            self._error
-        )
-
-        QShortcut(
-            QKeySequence(Qt.Key.Key_Space),
-            self,
-            activated=self.toggle_play,
-        )
-
-        QShortcut(
-            QKeySequence("F11"),
-            self,
-            activated=self.toggle_fullscreen,
-        )
-
-        QShortcut(
-            QKeySequence("Esc"),
-            self,
-            activated=self._leave_fullscreen,
-        )
-
-        QShortcut(
-            QKeySequence(Qt.Key.Key_Right),
-            self,
-            activated=self.next_video,
-        )
-
-        QShortcut(
-            QKeySequence(Qt.Key.Key_Left),
-            self,
-            activated=self.previous_video,
-        )
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self.toggle_play)
+        QShortcut(QKeySequence("F11"), self, activated=self.toggle_fullscreen)
+        QShortcut(QKeySequence("Esc"), self, activated=self._leave_fullscreen)
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self, activated=self.next_video)
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self, activated=self.previous_video)
 
         self._update_playlist_ui()
         self._load_current_video()
@@ -307,43 +163,18 @@ class VideoPlayerWindow(QMainWindow):
     @staticmethod
     def _format_time(milliseconds: int) -> str:
         seconds = max(0, milliseconds // 1000)
-
         hours, seconds = divmod(seconds, 3600)
         minutes, seconds = divmod(seconds, 60)
-
-        if hours:
-            return f"{hours}:{minutes:02d}:{seconds:02d}"
-
-        return f"{minutes:02d}:{seconds:02d}"
+        return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
     def _update_playlist_ui(self):
         total = len(self.playlist)
-
-        if total <= 1:
-            self.playlist_label.setText("")
-            self.previous_button.setEnabled(False)
-            self.next_button.setEnabled(False)
-        else:
-            self.playlist_label.setText(
-                f"{self.current_index + 1} / {total}"
-            )
-
-            self.previous_button.setEnabled(
-                self.current_index > 0
-            )
-
-            self.next_button.setEnabled(
-                self.current_index < total - 1
-            )
-
-        self.title.setText(
-            Path(self.playlist[self.current_index]).name
-        )
-
-        self.setWindowTitle(
-            f"Video bekijken — "
-            f"{Path(self.playlist[self.current_index]).name}"
-        )
+        self.playlist_label.setText(f"{self.current_index + 1} / {total}" if total > 1 else "")
+        self.previous_button.setEnabled(total > 1 and self.current_index > 0)
+        self.next_button.setEnabled(total > 1 and self.current_index < total - 1)
+        name = Path(self.playlist[self.current_index]).name
+        self.title.setText(name)
+        self.setWindowTitle(f"Video bekijken — {name}")
 
     def _load_current_video(self, autoplay=True):
         if not self.playlist:
@@ -351,45 +182,41 @@ class VideoPlayerWindow(QMainWindow):
             return
 
         self.path = self.playlist[self.current_index]
-
         self._update_playlist_ui()
-
         self.position.setRange(0, 0)
         self.current_time.setText("00:00")
         self.total_time.setText("00:00")
         self.status.setText("Laden...")
+        self._autoplay_requested = bool(autoplay)
 
         if not os.path.isfile(self.path):
-            self.status.setText(
-                "Bestand bestaat niet meer."
-            )
+            self._autoplay_requested = False
+            self.status.setText("Bestand bestaat niet meer.")
             return
 
+        # Belangrijk: laad eerst de media volledig. De oude code riep
+        # play() onmiddellijk na setSource() aan. Op sommige Windows/
+        # QtMultimedia-backends kan dat resulteren in ongeveer één seconde
+        # video waarna playback stopt.
         self.player.stop()
-        self.player.setSource(
-            QUrl.fromLocalFile(self.path)
-        )
-
-        if autoplay:
-            self.player.play()
+        self.player.setSource(QUrl.fromLocalFile(self.path))
 
     def toggle_play(self):
-        if (
-            self.player.playbackState()
-            == QMediaPlayer.PlaybackState.PlayingState
-        ):
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
+            self._autoplay_requested = True
             self.player.play()
 
     def stop(self):
+        self._autoplay_requested = False
         self.player.stop()
         self.player.setPosition(0)
 
     def previous_video(self):
         if self.current_index <= 0:
             return
-
         self.current_index -= 1
         self._load_current_video()
 
@@ -399,12 +226,10 @@ class VideoPlayerWindow(QMainWindow):
                 self.current_index = 0
                 self._load_current_video()
             else:
+                self._autoplay_requested = False
                 self.player.stop()
-                self.status.setText(
-                    "Playlist afgelopen"
-                )
+                self.status.setText("Playlist afgelopen")
             return
-
         self.current_index += 1
         self._load_current_video()
 
@@ -414,76 +239,58 @@ class VideoPlayerWindow(QMainWindow):
     def _position_changed(self, position: int):
         if not self.position.isSliderDown():
             self.position.setValue(position)
-
-        self.current_time.setText(
-            self._format_time(position)
-        )
+        self.current_time.setText(self._format_time(position))
 
     def _duration_changed(self, duration: int):
-        self.position.setRange(
-            0,
-            max(0, duration)
-        )
-
-        self.total_time.setText(
-            self._format_time(duration)
-        )
+        self.position.setRange(0, max(0, duration))
+        self.total_time.setText(self._format_time(duration))
 
     def _state_changed(self, state):
-        playing = (
-            state
-            == QMediaPlayer.PlaybackState.PlayingState
-        )
-
-        self.play_button.setIcon(
-            self.style().standardIcon(
-                QStyle.StandardPixmap.SP_MediaPause
-                if playing
-                else QStyle.StandardPixmap.SP_MediaPlay
-            )
-        )
-
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.play_button.setIcon(self.style().standardIcon(
+            QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay
+        ))
         if playing:
             self.status.setText("Afspelen")
-        elif (
-            state
-            == QMediaPlayer.PlaybackState.PausedState
-        ):
+        elif state == QMediaPlayer.PlaybackState.PausedState:
             self.status.setText("Gepauzeerd")
-        else:
+        elif state == QMediaPlayer.PlaybackState.StoppedState and self.player.mediaStatus() != QMediaPlayer.MediaStatus.EndOfMedia:
             self.status.setText("Klaar")
 
     def _media_status_changed(self, status):
-        if (
-            status
-            == QMediaPlayer.MediaStatus.EndOfMedia
+        # Start pas wanneer Qt meldt dat de media effectief geladen is.
+        if status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
         ):
+            if self._autoplay_requested:
+                self._autoplay_requested = False
+                self.player.play()
+            return
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self.repeat_button.isChecked():
                 self.player.setPosition(0)
                 self.player.play()
                 return
-
             if self.current_index < len(self.playlist) - 1:
                 self.current_index += 1
                 self._load_current_video()
             else:
-                self.status.setText(
-                    "Playlist afgelopen"
-                )
+                self.status.setText("Playlist afgelopen")
+
+        elif status == QMediaPlayer.MediaStatus.StalledMedia:
+            self.status.setText("Video tijdelijk geblokkeerd — wachten...")
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self.status.setText("Ongeldige of niet ondersteunde video.")
 
     def _repeat_changed(self, checked: bool):
-        self.repeat_button.setText(
-            "Herhalen: aan"
-            if checked
-            else "Herhalen: uit"
-        )
+        self.repeat_button.setText("Herhalen: aan" if checked else "Herhalen: uit")
 
     def delete_current_video(self):
         if not self.playlist:
             return
-
         path = self.playlist[self.current_index]
-
         if not os.path.isfile(path):
             self._remove_current_from_playlist()
             return
@@ -491,104 +298,60 @@ class VideoPlayerWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Naar Prullenbak",
-            "Wil je deze video naar de Windows Prullenbak verplaatsen?\n\n"
-            f"{Path(path).name}",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
+            "Wil je deze video naar de Windows Prullenbak verplaatsen?\n\n" + Path(path).name,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-
         if answer != QMessageBox.StandardButton.Yes:
             return
-
         if send2trash is None:
-            QMessageBox.critical(
-                self,
-                "Prullenbak",
-                "De module 'send2trash' is niet ge?nstalleerd.",
-            )
+            QMessageBox.critical(self, "Prullenbak", "De module 'send2trash' is niet geïnstalleerd.")
             return
 
         try:
-            # Eerst het afspelen stoppen.
+            self._autoplay_requested = False
             self.player.stop()
-
-            # Daarna de mediabron volledig loskoppelen.
-            # Alleen stop() kan het bestand nog tijdelijk open laten.
             self.player.setSource(QUrl())
-
-            # Eventuele laatste positie terugzetten.
-            self.position.setRange(0, 0)
-            self.current_time.setText("00:00")
-            self.total_time.setText("00:00")
-
-            # Windows heeft soms een moment nodig om de
-            # mediabestands-handle daadwerkelijk vrij te geven.
             from PySide6.QtCore import QCoreApplication
             QCoreApplication.processEvents()
-
             send2trash(path)
-
         except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Prullenbak",
-                "De video kon niet naar de Prullenbak "
-                f"worden verplaatst:\n\n{exc}",
-            )
+            QMessageBox.critical(self, "Prullenbak", f"De video kon niet naar de Prullenbak worden verplaatst:\n\n{exc}")
             return
 
         deleted_name = Path(path).name
-
         self._remove_current_from_playlist()
-
         if not self.playlist:
-            QMessageBox.information(
-                self,
-                "Video verwijderd",
-                f"{deleted_name} is naar de Prullenbak verplaatst.",
-            )
+            QMessageBox.information(self, "Video verwijderd", f"{deleted_name} is naar de Prullenbak verplaatst.")
             self.close()
             return
-
-        self.status.setText(
-            f"{deleted_name} naar de Prullenbak verplaatst."
-        )
-
+        self.status.setText(f"{deleted_name} naar de Prullenbak verplaatst.")
         self._load_current_video()
 
     def _remove_current_from_playlist(self):
         if not self.playlist:
             return
-
         self.playlist.pop(self.current_index)
-
         if not self.playlist:
             self.current_index = 0
             return
-
         if self.current_index >= len(self.playlist):
             self.current_index = len(self.playlist) - 1
-
         self._update_playlist_ui()
 
     def _error(self, error, error_string: str):
         if error != QMediaPlayer.Error.NoError:
-            self.status.setText(
-                "Kan video niet afspelen: "
-                f"{error_string or 'onbekende fout'}"
-            )
+            self.status.setText("Kan video niet afspelen: " + (error_string or "onbekende fout"))
 
     def toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
+        self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
     def _leave_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
 
     def closeEvent(self, event):
+        self._autoplay_requested = False
         self.player.stop()
+        self.player.setSource(QUrl())
         super().closeEvent(event)
