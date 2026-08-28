@@ -232,6 +232,12 @@ class VideoCutterWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Video Cutter", "FFmpeg kon het fragment niet maken.\n\n" + result.stderr.strip())
 
+    def closeEvent(self, event):
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.audio.stop()
+        event.accept()
+
 
 class VideoMergerWindow(QMainWindow):
     def __init__(self, parent=None):
