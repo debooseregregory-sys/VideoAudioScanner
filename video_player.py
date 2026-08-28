@@ -8,8 +8,8 @@ import tempfile
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QKeySequence, QProcess, QTimer, Qt, QUrl
-from PySide6.QtGui import QShortcut
+from PySide6.QtCore import QCoreApplication, QProcess, QTimer, Qt, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -241,7 +241,7 @@ class VideoPlayerWindow(QMainWindow):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         if playing:
-            self.status.setText("Afspelen")
+            self.status.setText("Afspelen" if not self._using_ffmpeg_fallback else "Afspelen via FFmpeg compatibiliteitsmodus")
         elif state == QMediaPlayer.PlaybackState.PausedState:
             self.status.setText("Gepauzeerd")
 
@@ -269,36 +269,79 @@ class VideoPlayerWindow(QMainWindow):
         if error == QMediaPlayer.Error.NoError:
             return
         if not self._using_ffmpeg_fallback:
-            self._start_ffmpeg_fallback()
+            self._start_ffmpeg_fallback(error_string)
         else:
             self.status.setText("Kan video niet afspelen: " + (error_string or "onbekende fout"))
 
     def _find_ffmpeg(self):
+        """Vind FFmpeg in de PyInstaller-app, PATH, WinGet en gangbare Windows-locaties."""
         candidates = []
+
+        # PyInstaller: ffmpeg.exe naast de EXE of in _internal.
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
             candidates += [exe_dir / "ffmpeg.exe", exe_dir / "_internal" / "ffmpeg.exe"]
             meipass = getattr(sys, "_MEIPASS", None)
             if meipass:
                 candidates.append(Path(meipass) / "ffmpeg.exe")
+
+        # Ontwikkelomgeving: naast video_player.py.
         candidates.append(Path(__file__).resolve().parent / "ffmpeg.exe")
+
+        # PATH en Windows where.exe.
         found = shutil.which("ffmpeg")
         if found:
             candidates.append(Path(found))
+        try:
+            where_result = subprocess.run(
+                ["where.exe", "ffmpeg.exe"], capture_output=True, text=True, timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if where_result.returncode == 0:
+                candidates.extend(Path(line.strip()) for line in where_result.stdout.splitlines() if line.strip())
+        except Exception:
+            pass
+
+        # WinGet-installatie van Gyan.FFmpeg.Shared, zoals op deze pc.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            winget_root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+            try:
+                for package_dir in winget_root.glob("Gyan.FFmpeg*"):
+                    candidates.extend(package_dir.glob("**/bin/ffmpeg.exe"))
+            except OSError:
+                pass
+
+        # Andere gebruikelijke Windows-installaties.
+        for root in (
+            Path("C:/ffmpeg"),
+            Path("C:/Program Files/ffmpeg"),
+            Path("C:/ProgramData/chocolatey/bin"),
+        ):
+            candidates.extend([root / "bin" / "ffmpeg.exe", root / "ffmpeg.exe"])
+
+        seen = set()
         for candidate in candidates:
             try:
+                candidate = candidate.resolve()
+                key = str(candidate).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
                 if candidate.is_file():
                     return str(candidate)
             except OSError:
                 pass
         return None
 
-    def _start_ffmpeg_fallback(self):
+    def _start_ffmpeg_fallback(self, qt_error=""):
+        """Gebruik FFmpeg automatisch wanneer Qt de bron niet kan decoderen."""
         if self._using_ffmpeg_fallback or not os.path.isfile(self.path):
             return False
+
         ffmpeg = self._find_ffmpeg()
         if not ffmpeg:
-            self.status.setText("Codec ontbreekt en ffmpeg.exe is niet gevonden.")
+            self.status.setText("Codec niet ondersteund en FFmpeg is niet gevonden.")
             return False
 
         self._stop_ffmpeg_fallback()
@@ -310,7 +353,7 @@ class VideoPlayerWindow(QMainWindow):
         except OSError:
             pass
 
-        self.status.setText("Codec niet ondersteund — FFmpeg maakt een compatibele stream...")
+        self.status.setText("Codec niet ondersteund — FFmpeg maakt automatisch een compatibele versie...")
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
             "-i", self.path,
@@ -333,6 +376,7 @@ class VideoPlayerWindow(QMainWindow):
             return False
 
         process = self._ffmpeg_process
+
         def worker():
             try:
                 stderr = process.communicate()[1]
@@ -344,7 +388,8 @@ class VideoPlayerWindow(QMainWindow):
             if code == 0 and output.exists() and output.stat().st_size > 0:
                 QTimer.singleShot(0, lambda: self._play_ffmpeg_output(output))
             else:
-                QTimer.singleShot(0, lambda: self._ffmpeg_failed(message))
+                QTimer.singleShot(0, lambda: self._ffmpeg_failed(message or qt_error))
+
         threading.Thread(target=worker, daemon=True).start()
         return True
 
@@ -441,7 +486,6 @@ class VideoPlayerWindow(QMainWindow):
             if hasattr(parent, "status"):
                 parent.status.setText(f"🗑 Naar Prullenbak: {Path(path).name}")
         except Exception:
-            # Verwijderen zelf is al gelukt; een GUI-refresh mag dat niet ongedaan maken.
             pass
 
     def _remove_missing_current(self):
