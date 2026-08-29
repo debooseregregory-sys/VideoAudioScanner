@@ -700,6 +700,10 @@ class VideoConverterWindow(QMainWindow):
         ]
         self._add_paths(paths)
 
+    def add_paths(self, paths: list[str]):
+        """Publieke API: paden toevoegen (bijv. vanuit de scanner)."""
+        self._add_paths(paths)
+
     def _add_paths(self, paths: list[str]):
         existing = set(self.files)
         for path in paths:

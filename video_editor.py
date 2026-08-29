@@ -151,18 +151,29 @@ class VideoCutterWindow(QMainWindow):
         self.start_ms = 0
         self.end_ms: int | None = None
 
-    def choose_source(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Kies video", "", VIDEO_FILTER + ";;Alle bestanden (*)")
-        if not path:
-            return
-        self.source = Path(path)
+    def load_path(self, path: str | Path, autoplay: bool = True) -> bool:
+        """Laad een video (o.a. vanuit de scanner via rechtsklik)."""
+        path = Path(path)
+        if not path.is_file():
+            QMessageBox.warning(self, "Video Cutter", f"Bestand niet gevonden:\n{path}")
+            return False
+        self.source = path
         self.start_ms = 0
         self.end_ms = None
         self.start_label.setText("Begin: 00:00:00.000")
         self.end_label.setText("Einde: niet ingesteld")
         self.output.setText(str(self.source.with_name(self.source.stem + "_knip" + self.source.suffix)))
+        self.setWindowTitle(f"Video Cutter — {path.name}")
         self.player.setSource(QUrl.fromLocalFile(str(self.source)))
-        self.player.play()
+        if autoplay:
+            self.player.play()
+        return True
+
+    def choose_source(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Kies video", "", VIDEO_FILTER + ";;Alle bestanden (*)")
+        if not path:
+            return
+        self.load_path(path)
 
     def duration_changed(self, duration):
         self.duration = max(0, int(duration))

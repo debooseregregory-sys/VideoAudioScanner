@@ -24,12 +24,14 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QTableView, QVBoxLayout, QWidget,
 )
 
 from duplicate_finder import DuplicateFinderWindow
 from video_player import VideoPlayerWindow
+from video_converter import VideoConverterWindow
+from video_editor import VideoCutterWindow
 from duplicate_fixes import install_fixes
 from scanner import MediaResult, MediaScanner
 
@@ -189,7 +191,7 @@ def move_to_recycle_bin(paths: list[str]) -> tuple[list[str], list[str]]:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.settings = QSettings("VideoAudioScanner", "VideoAudioScanner"); self.setWindowTitle("VideoAudioScanner"); self.resize(1550, 850)
-        self.model = ResultsModel(); self.proxy = FilterProxy(); self.proxy.setSourceModel(self.model); self.thread: Optional[QThread] = None; self.worker: Optional[ScanWorker] = None; self.duplicate_window: Optional[DuplicateFinderWindow] = None
+        self.model = ResultsModel(); self.proxy = FilterProxy(); self.proxy.setSourceModel(self.model); self.thread: Optional[QThread] = None; self.worker: Optional[ScanWorker] = None; self.duplicate_window: Optional[DuplicateFinderWindow] = None; self.converter_window = None; self.cutter_window = None
         self._build_ui(); self._build_menu(); self._apply_theme(); self._restore_state(); self.refresh_ffprobe_status(); self._update_action_state()
 
     def _build_ui(self):
@@ -213,7 +215,7 @@ class MainWindow(QMainWindow):
         self.play_selected_button.clicked.connect(self.play_selected_videos)
         filter_layout.addWidget(self.search, 1); filter_layout.addWidget(QLabel("Type:")); filter_layout.addWidget(self.type_filter); filter_layout.addWidget(QLabel("Status:")); filter_layout.addWidget(self.status_filter); filter_layout.addWidget(clear); filter_layout.addWidget(self.select_all_button); filter_layout.addWidget(self.delete_button); filter_layout.addWidget(self.play_selected_button); layout.addWidget(filter_box)
         self.progress = QProgressBar(); self.progress.setTextVisible(True); self.progress.setFormat("%v / %m"); layout.addWidget(self.progress); self.status = QLabel("Klaar om te scannen."); self.status.setObjectName("status"); layout.addWidget(self.status)
-        self.table = QTableView(); self.table.setModel(self.proxy); self.table.setSortingEnabled(True); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True); self.table.doubleClicked.connect(self.open_selected); self.table.selectionModel().selectionChanged.connect(self._update_action_state)
+        self.table = QTableView(); self.table.setModel(self.proxy); self.table.setSortingEnabled(True); self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection); self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True); self.table.doubleClicked.connect(self.open_selected); self.table.selectionModel().selectionChanged.connect(self._update_action_state); self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.table.customContextMenuRequested.connect(self._table_context_menu)
         header = self.table.horizontalHeader(); header.setStretchLastSection(False); header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for col, width in enumerate([300, 75, 85, 115, 105, 105, 95, 105, 80, 80, 115, 105, 250]): self.table.setColumnWidth(col, width)
         layout.addWidget(self.table, 1); self.setCentralWidget(root)
@@ -341,6 +343,91 @@ class MainWindow(QMainWindow):
         enabled = bool(self._selected_items()) if hasattr(self, "table") else False
         if hasattr(self, "delete_button"): self.delete_button.setEnabled(enabled)
         if hasattr(self, "delete_action"): self.delete_action.setEnabled(enabled)
+
+
+    def _table_context_menu(self, pos):
+        items = self._selected_items()
+        index = self.table.indexAt(pos)
+        if index.isValid() and not self.table.selectionModel().isSelected(index):
+            self.table.selectRow(index.row())
+            items = self._selected_items()
+
+        menu = QMenu(self)
+        act_play = menu.addAction("Afspelen")
+        act_open = menu.addAction("Openen met standaardprogramma")
+        menu.addSeparator()
+        act_convert = menu.addAction("Naar Video Converter...")
+        act_cut = menu.addAction("Naar Video Cutter...")
+        menu.addSeparator()
+        act_folder = menu.addAction("Map openen in Verkenner")
+        act_delete = menu.addAction("Naar Prullenbak")
+
+        videos = [i for i in items if i.media_type == "Video"]
+        act_play.setEnabled(bool(videos))
+        act_open.setEnabled(bool(items))
+        act_convert.setEnabled(bool(videos))
+        act_cut.setEnabled(len(videos) == 1)
+        act_folder.setEnabled(bool(items))
+        act_delete.setEnabled(bool(items))
+
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == act_play:
+            self.play_selected_videos()
+        elif chosen == act_open:
+            self._open_with_system(items)
+        elif chosen == act_convert:
+            self.send_to_converter(videos)
+        elif chosen == act_cut:
+            self.send_to_cutter(videos[0])
+        elif chosen == act_folder:
+            self._open_containing_folder(items[0].path)
+        elif chosen == act_delete:
+            self.delete_selected()
+
+    def send_to_converter(self, videos):
+        paths = [v.path for v in videos]
+        if not paths:
+            QMessageBox.information(self, "Converter", "Selecteer eerst een of meer videos.")
+            return
+        if self.converter_window is None:
+            self.converter_window = VideoConverterWindow()
+            self.converter_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.converter_window.destroyed.connect(lambda *args: setattr(self, "converter_window", None))
+        self.converter_window.add_paths(paths)
+        self.converter_window.show()
+        self.converter_window.raise_()
+        self.converter_window.activateWindow()
+        self.status.setText(f"{len(paths)} video(s) naar Converter gestuurd")
+
+    def send_to_cutter(self, video):
+        if self.cutter_window is None:
+            self.cutter_window = VideoCutterWindow()
+            self.cutter_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            self.cutter_window.destroyed.connect(lambda *args: setattr(self, "cutter_window", None))
+        self.cutter_window.load_path(video.path)
+        self.cutter_window.show()
+        self.cutter_window.raise_()
+        self.cutter_window.activateWindow()
+        self.status.setText(f"Video Cutter: {video.name}")
+
+    def _open_with_system(self, items):
+        for item in items[:10]:
+            try:
+                os.startfile(item.path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Openen", f"{item.name}\n{exc}")
+                break
+
+    def _open_containing_folder(self, path: str):
+        try:
+            if os.name == "nt":
+                subprocess.run(["explorer", "/select,", str(Path(path).resolve())], check=False)
+            else:
+                os.startfile(str(Path(path).resolve().parent))
+        except Exception as exc:
+            QMessageBox.warning(self, "Map openen", str(exc))
 
     def play_selected_videos(self):
         items = self._selected_items()
