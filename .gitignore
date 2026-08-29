@@ -9,3 +9,5 @@ build/
 dist/
 *.spec
 *.log
+
+ffmpeg-2026-08-23-git-1019f8f036-full_build/

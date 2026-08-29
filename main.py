@@ -8,6 +8,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
+# Qt Multimedia backend forceren VOORDAT PySide6 wordt geïmporteerd.
+# Op Windows: "windows" = Windows Media Foundation (betere codec-ondersteuning
+# met K-Lite/LAV). Alternatief om te testen: "ffmpeg".
+if sys.platform == "win32":
+    # "ffmpeg" = Qt FFmpeg-backend (onafhankelijk van K-Lite/WMF).
+    # Werkt beter voor MKV/HEVC/VP9 dan Windows Media Foundation.
+    os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
+
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QObject, QSettings,
     QSortFilterProxyModel, Qt, QThread, Signal,
@@ -232,7 +240,7 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: #353b45; } QPushButton#primary { background: #315f9e; border-color: #4679bd; font-weight: 600; } QPushButton#primary:hover { background: #3b70b6; } QPushButton#secondary { background: #3b313f; border-color: #66536b; font-weight: 600; } QPushButton#secondary:hover { background: #4b3d50; } QPushButton#danger { background: #54272b; border-color: #824047; font-weight: 600; } QPushButton#danger:hover { background: #6a3036; } QPushButton:disabled { color: #666c75; background: #202329; }
             QProgressBar { background: #1e2127; border: 1px solid #353a43; border-radius: 5px; height: 18px; text-align: center; } QProgressBar::chunk { background: #477dcc; border-radius: 4px; }
             QHeaderView::section { background: #252a31; color: #cfd4dc; padding: 8px; border: 0; border-right: 1px solid #343941; } QTableView { gridline-color: #30343b; } QTableView::item { padding: 6px; } QTableView::item:selected { background: #304a70; }
-            QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { color: #ffffff; font-weight: bold; }
+            QLabel#status { color: #aeb5c0; padding: 2px 4px; } QLabel#statCaption { color: #858c98; } QLabel#statValue { font-size: 19px; font-weight: 700; color: #ffffff; } QLabel#ffprobeStatus { font-weight: bold; }
         """)
     def open_duplicate_finder(self):
         folder = self.folder.text().strip(); self.duplicate_window = DuplicateFinderWindow()
@@ -242,21 +250,61 @@ class MainWindow(QMainWindow):
         geometry = self.settings.value("geometry")
         if geometry: self.restoreGeometry(geometry)
         self.folder.setText(str(self.settings.value("folder", "")))
-    def _configured_ffprobe(self) -> str: return str(self.settings.value("ffprobe", "")).strip()
+    def _configured_ffprobe(self) -> str:
+        return str(self.settings.value("ffprobe", "")).strip().strip('"')
+
     def _make_scanner(self) -> MediaScanner:
-        scanner = MediaScanner(); configured = self._configured_ffprobe()
-        if configured and os.path.isfile(configured): scanner.ffprobe = configured
-        return scanner
+        configured = self._configured_ffprobe()
+        if configured and os.path.isfile(configured) and "ffprobe" in Path(configured).name.lower():
+            return MediaScanner(configured)
+        return MediaScanner()
+
     def refresh_ffprobe_status(self):
+        configured = self._configured_ffprobe()
         scanner = self._make_scanner()
-        if scanner.ffprobe: self.ffprobe_status.setText(chr(8226) + chr(32) + chr(70)+chr(70)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(103)+chr(101)+chr(118)+chr(111)+chr(110)+chr(100)+chr(101)+chr(110)); self.ffprobe_status.setStyleSheet(chr(34)+chr(99)+chr(111)+chr(108)+chr(111)+chr(114)+chr(58)+chr(32)+chr(35)+chr(54)+chr(53)+chr(99)+chr(52)+chr(55)+chr(97)+chr(59)+chr(32)+chr(102)+chr(111)+chr(110)+chr(116)+chr(45)+chr(119)+chr(101)+chr(105)+chr(103)+chr(104)+chr(116)+chr(58)+chr(32)+chr(55)+chr(48)+chr(48)+chr(59)+chr(34)); self.ffprobe_path.setText(scanner.ffprobe)
-        else: self.ffprobe_status.setText(chr(8226) + chr(32) + chr(70)+chr(70)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(110)+chr(105)+chr(101)+chr(116)+chr(32)+chr(103)+chr(101)+chr(118)+chr(111)+chr(110)+chr(100)+chr(101)+chr(110)); self.ffprobe_status.setStyleSheet(chr(34)+chr(99)+chr(111)+chr(108)+chr(111)+chr(114)+chr(58)+chr(32)+chr(35)+chr(101)+chr(50)+chr(54)+chr(100)+chr(54)+chr(100)+chr(59)+chr(32)+chr(102)+chr(111)+chr(110)+chr(116)+chr(45)+chr(119)+chr(101)+chr(105)+chr(103)+chr(104)+chr(116)+chr(58)+chr(32)+chr(55)+chr(48)+chr(48)+chr(59)+chr(34)); self.ffprobe_path.setText(chr(34)+chr(73)+chr(110)+chr(115)+chr(116)+chr(97)+chr(108)+chr(108)+chr(101)+chr(101)+chr(114)+chr(32)+chr(70)+chr(70)+chr(109)+chr(112)+chr(101)+chr(103)+chr(32)+chr(111)+chr(102)+chr(32)+chr(107)+chr(105)+chr(101)+chr(115)+chr(32)+chr(104)+chr(97)+chr(110)+chr(100)+chr(109)+chr(97)+chr(116)+chr(105)+chr(103)+chr(32)+chr(101)+chr(101)+chr(110)+chr(32)+chr(102)+chr(102)+chr(112)+chr(114)+chr(111)+chr(98)+chr(101)+chr(32)+chr(101)+chr(120)+chr(101)+chr(99)+chr(117)+chr(116)+chr(97)+chr(98)+chr(108)+chr(101)+chr(46)+chr(34))
+        if scanner.ffprobe:
+            self.ffprobe_status.setText("• FFprobe gevonden")
+            self.ffprobe_status.setStyleSheet("QLabel { color: #65c47a; font-weight: bold; }")
+            note = ""
+            if configured and not os.path.isfile(configured):
+                note = "  (opgeslagen pad ongeldig — auto-detect gebruikt)"
+            elif configured and "ffprobe" not in Path(configured).name.lower():
+                note = "  (geen ffprobe.exe gekozen — auto-detect gebruikt)"
+            self.ffprobe_path.setText(scanner.ffprobe + note)
+        else:
+            self.ffprobe_status.setText("• FFprobe niet gevonden")
+            self.ffprobe_status.setStyleSheet("QLabel { color: #e26d6d; font-weight: bold; }")
+            if configured:
+                self.ffprobe_path.setText(
+                    f"Pad ongeldig: {configured} — wis het veld of kies ffprobe.exe"
+                )
+            else:
+                self.ffprobe_path.setText(
+                    "Installeer FFmpeg (winget install Gyan.FFmpeg) of kies ffprobe.exe via Instellingen."
+                )
+
     def configure_ffprobe(self):
         dialog = FFprobeDialog(self._configured_ffprobe(), self)
-        if dialog.exec() != QDialog.DialogCode.Accepted: return
-        value = dialog.value()
-        if value and not os.path.isfile(value): QMessageBox.warning(self, "FFprobe", "Het gekozen bestand bestaat niet."); return
-        self.settings.setValue("ffprobe", value); self.refresh_ffprobe_status()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        value = dialog.value().strip().strip('"')
+        if value:
+            if not os.path.isfile(value):
+                QMessageBox.warning(self, "FFprobe", "Het gekozen bestand bestaat niet.")
+                return
+            if "ffprobe" not in Path(value).name.lower():
+                QMessageBox.warning(
+                    self,
+                    "FFprobe",
+                    "Kies ffprobe.exe (niet ffmpeg.exe).\n\n"
+                    "FFprobe staat meestal in dezelfde map als ffmpeg, bijvoorbeeld:\n"
+                    r"C:\ffmpeg\bin\ffprobe.exe",
+                )
+                return
+        # Leeg = automatische detectie
+        self.settings.setValue("ffprobe", value)
+        self.refresh_ffprobe_status()
+
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Kies scanmap", self.folder.text() or str(Path.home()))
         if folder: self.folder.setText(folder); self.settings.setValue("folder", folder)

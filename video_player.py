@@ -187,18 +187,8 @@ class VideoPlayerWindow(QMainWindow):
         self._load_generation += 1
         generation = self._load_generation
 
-        # Stop een eventuele FFmpeg-conversie van de vorige video.
+        # Stop FFmpeg-conversie van de vorige video.
         self._stop_ffmpeg_fallback()
-
-        # Maak de oude QMediaPlayer volledig onbruikbaar.
-        old_player = getattr(self, "player", None)
-        if old_player is not None:
-            try:
-                old_player.stop()
-                old_player.setVideoOutput(None)
-                old_player.deleteLater()
-            except Exception:
-                pass
 
         self.path = self.playlist[self.current_index]
         self._update_playlist_ui()
@@ -210,21 +200,48 @@ class VideoPlayerWindow(QMainWindow):
         self._autoplay_requested = bool(autoplay)
         self._using_ffmpeg_fallback = False
 
-        # Iedere video krijgt een volledig nieuwe QMediaPlayer.
+        if not os.path.isfile(self.path):
+            self._autoplay_requested = False
+            self.status.setText("Bestand bestaat niet meer.")
+            QTimer.singleShot(0, self._remove_missing_current)
+            return
+
+        # Oude player veilig stoppen en signals loskoppelen (voorkomt
+        # "missing codec" / crashes bij Volgende/Vorige op Windows).
+        old_player = getattr(self, "player", None)
+        if old_player is not None:
+            for signal_name in (
+                "positionChanged",
+                "durationChanged",
+                "playbackStateChanged",
+                "mediaStatusChanged",
+                "errorOccurred",
+            ):
+                try:
+                    getattr(old_player, signal_name).disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            try:
+                old_player.stop()
+                old_player.setSource(QUrl())
+                old_player.setVideoOutput(None)
+            except Exception:
+                pass
+            old_player.deleteLater()
+            QCoreApplication.processEvents()
+
+        # Nieuwe, schone QMediaPlayer voor deze video.
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
-
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._state_changed)
         self.player.mediaStatusChanged.connect(self._media_status_changed)
         self.player.errorOccurred.connect(self._error)
 
-        if not os.path.isfile(self.path):
-            self._autoplay_requested = False
-            self.status.setText("Bestand bestaat niet meer.")
-            QTimer.singleShot(0, self._remove_missing_current)
+        # Generatie-check: negeer late callbacks van vorige video.
+        if generation != self._load_generation:
             return
 
         self.player.setSource(QUrl.fromLocalFile(self.path))
@@ -293,6 +310,11 @@ class VideoPlayerWindow(QMainWindow):
             else:
                 self.status.setText("Playlist afgelopen")
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            try:
+                if self.player.source().isEmpty():
+                    return
+            except Exception:
+                return
             self._start_ffmpeg_fallback()
         elif status == QMediaPlayer.MediaStatus.StalledMedia:
             self.status.setText("Video tijdelijk geblokkeerd — wachten...")
@@ -300,12 +322,49 @@ class VideoPlayerWindow(QMainWindow):
     def _error(self, error, error_string):
         if error == QMediaPlayer.Error.NoError:
             return
+        try:
+            if self.player is not None and self.player.source().isEmpty():
+                return
+        except Exception:
+            return
+        msg = (error_string or "").strip()
         if not self._using_ffmpeg_fallback:
-            self._start_ffmpeg_fallback(error_string)
+            self.status.setText("Codec-probleem — FFmpeg probeert een compatibele versie...")
+            started = self._start_ffmpeg_fallback(msg)
+            if not started:
+                self._offer_external_player(msg)
         else:
-            self.status.setText("Kan video niet afspelen: " + (error_string or "onbekende fout"))
+            self.status.setText("Kan video niet afspelen: " + (msg or "onbekende fout"))
+            self._offer_external_player(msg)
+
+    def _offer_external_player(self, qt_error=""):
+        """Laatste redmiddel: openen met de standaard Windows-speler (VLC/Films)."""
+        if self._closing or not self.path or not os.path.isfile(self.path):
+            return
+        detail = f"\n\nQt: {qt_error}" if qt_error else ""
+        answer = QMessageBox.question(
+            self,
+            "Afspelen mislukt",
+            "De ingebouwde speler kan deze video niet afspelen "
+            "(vaak: ontbrekende codec in Qt/Windows Media Foundation).\n\n"
+            "Openen met de standaard Windows-speler?\n"
+            "(bijv. VLC of Films & TV)"
+            + detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                if os.name == "nt":
+                    os.startfile(self.path)  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(["xdg-open", self.path])
+                self.status.setText("Geopend in externe speler")
+            except Exception as exc:
+                QMessageBox.warning(self, "Externe speler", str(exc))
 
     def _find_ffmpeg(self):
+
         """Vind FFmpeg in de PyInstaller-app, PATH, WinGet en gangbare Windows-locaties."""
         candidates = []
 
@@ -373,7 +432,21 @@ class VideoPlayerWindow(QMainWindow):
 
         ffmpeg = self._find_ffmpeg()
         if not ffmpeg:
-            self.status.setText("Codec niet ondersteund en FFmpeg is niet gevonden.")
+            self._using_ffmpeg_fallback = False
+            self.status.setText(
+                "Codec niet ondersteund — FFmpeg niet gevonden. "
+                "Installeer K-Lite Codec Pack of: winget install Gyan.FFmpeg"
+            )
+            detail = f"Qt-fout: {qt_error}" if qt_error else ""
+            QMessageBox.warning(
+                self,
+                "Afspelen mislukt",
+                "Deze video kan niet worden afgespeeld.\n\n"
+                "Oorzaken:\n"
+                "• Ontbrekende systeemcodecs (installeer K-Lite Codec Pack Basic of LAV Filters)\n"
+                "• FFmpeg niet in PATH (winget install Gyan.FFmpeg)\n\n"
+                + detail,
+            )
             return False
 
         self._stop_ffmpeg_fallback()
@@ -418,6 +491,7 @@ class VideoPlayerWindow(QMainWindow):
                 stderr = str(exc).encode()
                 code = -1
             message = stderr.decode("utf-8", errors="replace").strip()[-500:]
+
             def finish_on_ui():
                 if self._closing:
                     return
@@ -450,7 +524,17 @@ class VideoPlayerWindow(QMainWindow):
 
     def _ffmpeg_failed(self, message):
         self._using_ffmpeg_fallback = False
-        self.status.setText("FFmpeg kon deze video niet converteren." + (f" {message}" if message else ""))
+        detail = f" {message}" if message else ""
+        self.status.setText("FFmpeg kon deze video niet converteren." + detail)
+        extra = f"\n\nFFmpeg: {message}" if message else ""
+        QMessageBox.warning(
+            self,
+            "Conversie mislukt",
+            "FFmpeg kon deze video niet omzetten naar een afspeelbaar formaat.\n\n"
+            "Controleer of het bestand niet corrupt is en of FFmpeg werkt:\n"
+            '  ffmpeg -i "pad\\naar\\video"'
+            + extra,
+        )
 
     def _stop_ffmpeg_fallback(self):
         process = self._ffmpeg_process

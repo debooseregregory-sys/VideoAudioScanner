@@ -235,7 +235,11 @@ class VideoCutterWindow(QMainWindow):
     def closeEvent(self, event):
         self.player.stop()
         self.player.setSource(QUrl())
-        self.audio.stop()
+        # QAudioOutput heeft geen stop(); volume dempen is voldoende.
+        try:
+            self.audio.setVolume(0.0)
+        except Exception:
+            pass
         event.accept()
 
 
